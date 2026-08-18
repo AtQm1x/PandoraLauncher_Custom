@@ -63,7 +63,7 @@ pub const MAIN_FONT: &'static str = "Inter 24pt 24pt";
 #[cfg(not(windows))]
 pub const MAIN_FONT: &'static str = "Inter 24pt";
 
-actions!([Quit, CloseWindow, OpenSettings, Forwards, Backwards]);
+actions!([Quit, CloseWindow, OpenSettings, Forwards, Backwards, Confirm]);
 
 pub fn start(
     launcher_dir: PathBuf,
@@ -159,6 +159,7 @@ pub fn start(
             KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-[", Backwards, None),
             KeyBinding::new("secondary-]", Forwards, None),
+            KeyBinding::new("enter", Confirm, None),
         ]);
 
         cx.on_action(|_: &Quit, cx| {

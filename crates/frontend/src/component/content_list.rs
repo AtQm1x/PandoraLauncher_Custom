@@ -243,6 +243,25 @@ impl ContentListDelegate {
             },
         };
 
+        let unzip_button = if summary.content_summary.extra.modpack_files().is_some() {
+            Some(Button::new(("unzip", element_id))
+                .outline()
+                .icon(PandoraIcon::PackageOpen)
+                .tooltip("Unzip Modpack")
+                .on_click({
+                    let instance_id = self.id;
+                    let content_id = summary.id;
+                    let content_title = summary.filename.clone();
+                    let backend_handle = self.backend_handle.clone();
+                    move |_: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        crate::modals::unzip_modpack::open_unzip_modpack(instance_id, content_id, &content_title, backend_handle.clone(), window, cx);
+                    }
+                }))
+        } else {
+            None
+        };
+
         let backend_handle = self.backend_handle.clone();
 
         let toggle_control = Switch::new(("toggle", element_id))
@@ -314,11 +333,15 @@ impl ContentListDelegate {
             .border_1()
             .when(selected, |content| content.border_color(cx.theme().selection).bg(cx.theme().selection.alpha(0.2)));
 
-        if let Some(update_button) = update_button {
-            item_content = item_content.child(h_flex().absolute().right_4().gap_2().child(update_button).child(delete_button))
-        } else {
-            item_content = item_content.child(delete_button.absolute().right_4())
+        let mut right_buttons = Vec::new();
+        if let Some(unzip_button) = unzip_button {
+            right_buttons.push(unzip_button.into_any_element());
         }
+        if let Some(update_button) = update_button {
+            right_buttons.push(update_button.into_any_element());
+        }
+        right_buttons.push(delete_button.into_any_element());
+        item_content = item_content.child(h_flex().absolute().right_4().gap_2().children(right_buttons));
 
         ListItem::new(("item", element_id)).p_1().child(item_content).on_click(cx.listener(move |this, click: &ClickEvent, _, cx| {
             cx.stop_propagation();

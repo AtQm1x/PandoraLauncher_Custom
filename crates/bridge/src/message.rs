@@ -213,6 +213,11 @@ pub enum MessageToBackend {
         content_id: InstanceContentID,
         modal_action: ModalAction,
     },
+    UnzipModpack {
+        id: InstanceID,
+        content_id: InstanceContentID,
+        modal_action: ModalAction,
+    },
     Sleep5s,
     ReadLog {
         path: Arc<Path>,

@@ -1,7 +1,7 @@
 use std::{ffi::{OsStr, OsString}, io::Write, path::{Path, PathBuf}, sync::Arc};
 
 use bridge::{
-    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentFolder, ContentSummary, ContentType, ModpackFileSource}, modal_action::{ModalAction, ProgressTracker, ProgressTrackerFinishType}, safe_path::SafePath
+    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentFolder, ContentSummary, ContentType, ModpackFileSource}, modal_action::{ModalAction, ProgressTrackerFinishType}, safe_path::SafePath
 };
 use parking_lot::Mutex;
 use reqwest::StatusCode;
@@ -154,7 +154,7 @@ impl BackendState {
         let mut files = match result {
             Ok(files) => files,
             Err(error) => {
-                modal_action.set_error_message(Arc::from(format!("{}", error).as_str()));
+                modal_action.set_finished_with_error(Arc::from(format!("{}", error).as_str()));
                 return;
             }
         };
@@ -251,7 +251,7 @@ impl BackendState {
 
                 let _ = std::fs::create_dir_all(target_path.parent().unwrap());
 
-                match crate::hard_link_or_copy(&install.from, &target_path) {
+                match crate::fs::fastcopy(&install.from, &target_path, true, true) {
                     Ok(()) => {
                         if let Some(replace) = install.replace {
                             self.replace_aux_path(&replace, &install.mod_summary, &target_path);
@@ -267,7 +267,7 @@ impl BackendState {
                     Err(err) => {
                         log::error!("Failed to install content to {:?}: {err}", target_path);
                         let message = format!("Failed to install content to {}: {err}", target_path.display());
-                        modal_action.set_error_message(Arc::from(message.as_str()));
+                        modal_action.set_finished_with_error(Arc::from(message.as_str()));
                     },
                 }
             }
@@ -306,9 +306,8 @@ impl BackendState {
                 let permit = self.content_install_semaphore.acquire().await;
 
                 let title = format!("Fetching versions for Modrinth project {}", project_id);
-                let tracker = ProgressTracker::new(title.into(), self.send.clone());
+                let tracker = modal_action.push_tracker(title.into());
                 tracker.add_total(1);
-                modal_action.trackers.push(tracker.clone());
 
                 let mut is_wrong_version = false;
                 let mut is_wrong_loader = false;
@@ -510,9 +509,8 @@ impl BackendState {
                 let permit = self.content_install_semaphore.acquire().await;
 
                 let title = format!("Fetching versions for Curseforge project {}", project_id);
-                let tracker = ProgressTracker::new(title.into(), self.send.clone());
+                let tracker = modal_action.push_tracker(title.into());
                 tracker.add_total(1);
-                modal_action.trackers.push(tracker.clone());
 
                 let mod_loader_type = match content.loader {
                     Loader::Vanilla => None,
@@ -757,16 +755,13 @@ impl BackendState {
             },
             ContentDownload::File { path: ref copy_path } => {
                 let title = format!("Copying {}", copy_path.file_name().unwrap().to_string_lossy());
-                let tracker = ProgressTracker::new(title.into(), self.send.clone());
-                modal_action.trackers.push(tracker.clone());
+                let tracker = modal_action.push_tracker(title.into());
 
                 tracker.set_total(3);
-                tracker.notify();
 
                 let data = tokio::fs::read(copy_path).await?;
 
                 tracker.set_count(1);
-                tracker.notify();
 
                 let mut hasher = Sha1::new();
                 hasher.update(&data);
@@ -795,10 +790,9 @@ impl BackendState {
                     let tracker = tracker.clone();
                     let extension = extension.map(OsString::from);
                     tokio::task::spawn_blocking(move || {
-                        let valid_hash_on_disk = crate::check_sha1_hash(&path, hash).unwrap_or(false);
+                        let valid_hash_on_disk = crate::fs::check_sha1_hash(&path, hash).unwrap_or(false);
 
                         tracker.set_count(2);
-                        tracker.notify();
 
                         if !valid_hash_on_disk {
                             std::fs::write(&path, &data)?;
@@ -809,7 +803,6 @@ impl BackendState {
                 };
 
                 tracker.set_count(3);
-                tracker.notify();
 
                 let install_path = match &content_file.path {
                     ContentInstallPath::Raw(path) => Some(path.clone()),
@@ -870,7 +863,7 @@ impl BackendState {
             return;
         }
 
-        let Some(old_aux_path) = crate::pandora_aux_path(&old_summary.id, &old_summary.name, &replace) else {
+        let Some(old_aux_path) = crate::fs::pandora_aux_path(&old_summary.id, &old_summary.name, &replace) else {
             return;
         };
 
@@ -883,7 +876,7 @@ impl BackendState {
             return;
         }
 
-        let Some(new_aux_path) = crate::pandora_aux_path(&new_summary.id, &new_summary.name, new_path) else {
+        let Some(new_aux_path) = crate::fs::pandora_aux_path(&new_summary.id, &new_summary.name, new_path) else {
             _ = std::fs::remove_file(&old_aux_path);
             return;
         };
@@ -1037,23 +1030,20 @@ impl BackendState {
         let file_name = name.filename.clone();
 
         let title = format!("Downloading {}", file_name.as_deref().map(|s| s.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed("???")));
-        let tracker = ProgressTracker::new(title.into(), self.send.clone());
-        modal_action.trackers.push(tracker.clone());
+        let tracker = modal_action.push_tracker(title.into());
 
         tracker.set_total(size);
-        tracker.notify();
 
         let valid_hash_on_disk = {
             let path = path.clone();
             tokio::task::spawn_blocking(move || {
-                crate::check_sha1_hash(&path, sha1).unwrap_or(false)
+                crate::fs::check_sha1_hash(&path, sha1).unwrap_or(false)
             }).await.unwrap()
         };
 
         if valid_hash_on_disk {
             tracker.set_count(size);
             tracker.set_finished(ProgressTrackerFinishType::Normal);
-            tracker.notify();
             let summary = self.mod_metadata_manager.get_path(&path);
             return Ok((path, sha1, summary));
         }
@@ -1087,7 +1077,6 @@ impl BackendState {
 
             total_bytes += item.len();
             tracker.add_count(item.len());
-            tracker.notify();
 
             hasher.write_all(&item)?;
             file.write_all(&item)?;

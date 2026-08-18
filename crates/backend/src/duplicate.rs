@@ -3,14 +3,14 @@ use sha1::Digest;
 
 use bridge::{
     instance::InstanceID,
-    modal_action::{ModalAction, ProgressTracker, ProgressTrackerFinishType},
+    modal_action::{ModalAction, ProgressTrackerFinishType},
 };
 
 use crate::BackendState;
 
 fn find_content_library_path(content_library_dir: &Path, hash: [u8; 20], path: &Path) -> Option<PathBuf> {
     let extension = path.extension().and_then(|s| s.to_str());
-    let lib_path = crate::create_content_library_path(content_library_dir, hash, extension);
+    let lib_path = crate::fs::create_content_library_path(content_library_dir, hash, extension);
     if lib_path.exists() {
         return Some(lib_path);
     }
@@ -20,7 +20,7 @@ fn find_content_library_path(content_library_dir: &Path, hash: [u8; 20], path: &
         .and_then(|filename| filename.strip_suffix(".disabled"))
         .and_then(|base| Path::new(base).extension())
         .and_then(|s| s.to_str());
-    let lib_path = crate::create_content_library_path(content_library_dir, hash, disabled_extension);
+    let lib_path = crate::fs::create_content_library_path(content_library_dir, hash, disabled_extension);
     lib_path.exists().then_some(lib_path)
 }
 
@@ -150,11 +150,11 @@ fn duplicate_with_content_library(
 
         // If the source_path was hard linked from the content library
         // We will make the duplicated file also hard linked
-        if crate::has_multiple_hard_links(source_path).unwrap_or(true) {
+        if let Ok(source_metadata) = crate::fs::FileMetadata::new(source_path) && source_metadata.number_of_links() > 1 {
             if let Ok(hash) = hash_file(source_path, &mut buf, check_cancel) {
                 if let Some(lib_path) = find_content_library_path(content_library_dir, hash, source_path) {
-                    if crate::are_files_hard_linked(&source_path, &lib_path).unwrap_or(false) {
-                        if crate::hard_link_or_copy(&lib_path, &dest).is_ok() {
+                    if let Ok(lib_metadata) = crate::fs::FileMetadata::new(&lib_path) && source_metadata.is_same(&lib_metadata) {
+                        if crate::fs::fastcopy(&lib_path, &dest, false, true).is_ok() {
                             files_done += 1;
                             progress(files_done, total_files);
                             continue;
@@ -172,13 +172,13 @@ fn duplicate_with_content_library(
     for (relative, internal) in &internal_symlinks {
         let dest = to.join(relative);
         let target = to.join(internal);
-        if let Err(err) = crate::symlink_dir_or_file(&target, &dest) {
+        if let Err(err) = crate::fs::symlink_dir_or_file(&target, &dest) {
             return Err(err);
         }
     }
     for (relative, target) in &external_symlinks {
         let dest = to.join(relative);
-        if let Err(err) = crate::symlink_dir_or_file(&target, &dest) {
+        if let Err(err) = crate::fs::symlink_dir_or_file(&target, &dest) {
             return Err(err);
         }
     }
@@ -207,27 +207,23 @@ pub async fn duplicate_instance(
     name: &str,
     modal_action: ModalAction,
 ) {
-    if !crate::is_single_component_path_str(name) {
-        modal_action.set_error_message(format!("Unable to duplicate instance, name must not be a path: {name}").into());
-        modal_action.set_finished();
+    if !crate::fs::is_single_component_path_str(name) {
+        modal_action.set_finished_with_error(format!("Unable to duplicate instance, name must not be a path: {name}").into());
         return;
     }
     if !sanitize_filename::is_sanitized_with_options(name, sanitize_filename::OptionsForCheck { windows: true, ..Default::default() }) {
-        modal_action.set_error_message(format!("Unable to duplicate instance, name is invalid: {name}").into());
-        modal_action.set_finished();
+        modal_action.set_finished_with_error(format!("Unable to duplicate instance, name is invalid: {name}").into());
         return;
     }
     if backend.instance_state.read().instances.iter().any(|i| i.name == name) {
-        modal_action.set_error_message("Unable to duplicate instance, name is already used".to_string().into());
-        modal_action.set_finished();
+        modal_action.set_finished_with_error("Unable to duplicate instance, name is already used".to_string().into());
         return;
     }
 
     let source = {
         let state = backend.instance_state.read();
         let Some(instance) = state.instances.get(id) else {
-            modal_action.set_error_message("Unable to duplicate instance, unknown id".to_string().into());
-            modal_action.set_finished();
+            modal_action.set_finished_with_error("Unable to duplicate instance, unknown id".to_string().into());
             return;
         };
         instance.root_path.clone()
@@ -236,22 +232,18 @@ pub async fn duplicate_instance(
     let dest = backend.directories.instances_dir.join(name);
 
     if let Err(err) = fs::create_dir(&dest) {
-        modal_action.set_error_message(format!("Unable to create instance directory: {err}").into());
-        modal_action.set_finished();
+        modal_action.set_finished_with_error(format!("Unable to create instance directory: {err}").into());
         return;
     }
 
-    let tracker = ProgressTracker::new("Copying instance files...".into(), backend.send.clone());
-    modal_action.trackers.push(tracker.clone());
+    let tracker = modal_action.push_tracker("Copying instance files...".into());
 
     let result = duplicate_with_content_library(&source, &dest, &backend.directories.content_library_dir, &|current, total| {
         tracker.set_count(current as usize);
         tracker.set_total(total as usize);
-        tracker.notify();
     }, &|| {
         if modal_action.has_requested_cancel() {
             tracker.set_title("Cancelling...".into());
-            tracker.notify();
             Err(Error::new(ErrorKind::Interrupted, "Operation cancelled"))
         } else {
             Ok(())
@@ -261,17 +253,14 @@ pub async fn duplicate_instance(
     match result {
         Ok(()) => {
             tracker.set_finished(ProgressTrackerFinishType::Normal);
-            tracker.notify();
         },
         Err(error) => {
             let _ = fs::remove_dir_all(&dest);
             if modal_action.has_requested_cancel() {
                 tracker.set_finished(ProgressTrackerFinishType::Fast);
-                tracker.notify();
             } else {
                 tracker.set_finished(ProgressTrackerFinishType::Error);
-                tracker.notify();
-                modal_action.set_error_message(error.to_string().into());
+                modal_action.set_finished_with_error(error.to_string().into());
             }
         },
     }
