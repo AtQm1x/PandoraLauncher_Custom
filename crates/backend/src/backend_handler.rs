@@ -2032,8 +2032,7 @@ impl BackendState {
         }
         modal_action.clear_trackers();
 
-        let launch_tracker = ProgressTracker::new(Arc::from("Launching"), self.send.clone());
-        modal_action.trackers.push(launch_tracker.clone());
+        let launch_tracker = modal_action.push_tracker("Launching".into());
         let authlib_injector_url = self.account_info.write().get().accounts.get(&login_info.uuid).and_then(|a| a.authlib_injector_url.clone());
         let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, authlib_injector_url, live_game_output.is_some(), &launch_tracker, &modal_action).await;
 
@@ -2455,8 +2454,7 @@ impl BackendState {
                 if let Some(secret_storage) = self.get_secret_storage(Some(modal_action)).await {
                     if let Err(e) = secret_storage.write_credentials(uuid, &credentials).await {
                         log::error!("Failed to save credentials for authlib-injector account: {}", e);
-                        modal_action.set_error_message(format!("Failed to save credentials: {}", e).into());
-                        modal_action.set_finished();
+                        modal_action.set_finished_with_error(format!("Failed to save credentials: {}", e).into());
                         return;
                     }
                     log::info!("Successfully saved credentials for authlib-injector account");
@@ -2503,8 +2501,7 @@ impl BackendState {
             }
             Err(e) => {
                 log::error!("Error in authlib_injector_authenticate: {}", e);
-                modal_action.set_error_message(e.into());
-                modal_action.set_finished();
+                modal_action.set_finished_with_error(e.into());
             }
         }
     }

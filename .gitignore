@@ -6,3 +6,6 @@ flamegraph.svg
 heaptrack*
 .DS_Store
 .idea/
+launcher.log
+.gitignore
+scripts/*_hidden*
