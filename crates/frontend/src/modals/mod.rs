@@ -1,10 +1,12 @@
 pub mod accounts;
+pub mod change_version;
 pub mod create_instance;
 pub mod curseforge_install;
 pub mod delete_instance;
 pub mod duplicate_instance;
 pub mod export_instance;
 pub mod generic;
+pub mod manual_curseforge_downloads;
 pub mod modrinth_install;
 pub mod select_icon;
 pub mod settings;

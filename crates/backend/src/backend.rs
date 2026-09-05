@@ -10,7 +10,7 @@ use auth::{
     serve_redirect::{self, ProcessAuthorizationError},
 };
 use bridge::{
-    handle::{BackendHandle, BackendReceiver, FrontendHandle}, install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath}, instance::{ContentFolder, ContentType, InstanceContentSummary, InstanceID, ModpackFile, ModpackFilePath, ModpackFileSource}, message::{EmbeddedOrRaw, MessageToFrontend}, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, quit::QuitCoordinator, safe_path::SafePath
+    handle::{BackendHandle, BackendReceiver, FrontendHandle}, install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath}, instance::{ContentFolder, ContentType, InstanceContentSummary, InstanceID, ModpackFile, ModpackFilePath, ModpackFileSource}, manual_download::ManualCurseforgeDownload, message::{EmbeddedOrRaw, MessageToFrontend}, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, quit::QuitCoordinator, safe_path::SafePath
 };
 use image::ImageFormat;
 use indexmap::IndexSet;
@@ -24,7 +24,7 @@ use ustr::Ustr;
 use uuid::Uuid;
 
 use crate::{
-    account::{BackendAccountInfo, MinecraftLoginInfo}, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::{CurseforgeGetFilesMetadataItem, MinecraftVersionManifestMetadataItem}, manager::MetadataManager}, mod_metadata::ModMetadataManager, persistent::Persistent, server_list_pinger::ServerListPinger, skin_manager::SkinManager
+    account::{BackendAccountInfo, MinecraftLoginInfo}, curseforge_manual_download::ManualCurseforgeDownloadSession, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeProjectItem, MinecraftVersionManifestMetadataItem}, manager::MetadataManager}, mod_metadata::ModMetadataManager, persistent::Persistent, server_list_pinger::ServerListPinger, skin_manager::SkinManager
 };
 
 fn build_http_clients(user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) -> (reqwest::Client, reqwest::Client) {
@@ -145,6 +145,7 @@ pub fn start(runtime: tokio::runtime::Runtime, launcher_dir: PathBuf, send: Fron
         quit_coordinator: quit_handler,
         should_quit: AtomicBool::new(false),
         content_install_semaphore: Semaphore::new(8),
+        manual_curseforge_downloads: ManualCurseforgeDownloadSession::default(),
     };
 
     log::debug!("Doing initial backend load");
@@ -170,6 +171,7 @@ pub enum WatchTarget {
     InstanceSavesDir { id: InstanceID },
     InstanceContentDir { id: InstanceID, folder: ContentFolder },
     SkinLibraryDir,
+    ManualCurseForgeDownloadDirectory { session_id: usize },
 }
 
 pub struct BackendStateInstances {
@@ -206,6 +208,7 @@ pub struct BackendState {
     pub quit_coordinator: QuitCoordinator,
     pub should_quit: AtomicBool,
     pub content_install_semaphore: Semaphore,
+    pub manual_curseforge_downloads: ManualCurseforgeDownloadSession,
 }
 
 pub struct CachedMinecraftProfile {
@@ -230,13 +233,17 @@ impl CachedMinecraftProfile {
 }
 
 impl BackendState {
+    pub async fn create_manual_curseforge_download_session(&self, files: Vec<ManualCurseforgeDownload>) {
+        self.manual_curseforge_downloads.start(files, self).await;
+    }
+
     async fn start(self, recv: BackendReceiver, watcher_rx: Receiver<notify_debouncer_full::DebounceEventResult>) {
         log::info!("Starting backend");
 
         tokio::task::spawn(crate::update::check_for_updates(self.redirecting_http_client.clone(), self.send.clone()));
 
         // Pre-fetch version manifest
-        self.meta.load(&MinecraftVersionManifestMetadataItem).await;
+        self.meta.preload(MinecraftVersionManifestMetadataItem);
 
         Arc::new(self).handle(recv, watcher_rx).await;
     }
@@ -400,7 +407,15 @@ impl BackendState {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tokio::pin!(interval);
 
+        #[cfg(unix)]
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap();
+
         loop {
+            #[cfg(unix)]
+            let signal_recv = signal.recv();
+            #[cfg(not(unix))]
+            let signal_recv = std::future::pending::<Option<()>>();
+
             tokio::select! {
                 message = backend_recv.recv() => {
                     if let Some(message) = message {
@@ -418,8 +433,11 @@ impl BackendState {
                         break;
                     }
                 },
+                _ = signal_recv => {
+                    self.check_child_processes();
+                },
                 _ = interval.tick() => {
-                    self.handle_tick().await;
+                    self.handle_tick();
                 }
             }
 
@@ -427,7 +445,7 @@ impl BackendState {
                 while let Some(message) = backend_recv.try_recv() {
                     self.handle_message(message).await;
                 }
-                self.handle_tick().await;
+                self.handle_tick();
                 break;
             }
         }
@@ -435,10 +453,13 @@ impl BackendState {
         self.send.send(MessageToFrontend::Quit);
     }
 
-    async fn handle_tick(&self) { // todo: make this non-async
-        self.meta.expire().await;
+    fn handle_tick(&self) {
+        self.meta.expire();
         self.mod_metadata_manager.write_changes();
+        self.check_child_processes();
+    }
 
+    fn check_child_processes(&self) {
         let mut any_process_alive = false;
 
         let mut instance_state = self.instance_state.write();
@@ -1155,6 +1176,7 @@ impl BackendState {
         };
 
         let mut content_install_files = Vec::new();
+        let mut manual_downloads = Vec::new();
 
         for file in files.iter() {
             if let Some(summary) = &file.summary && summary.hash == file.hash {
@@ -1176,10 +1198,6 @@ impl BackendState {
                     });
                 },
                 ModpackFileSource::DownloadCurseforge { file_id } => {
-                    if file.disabled_third_party_downloads {
-                        continue;
-                    }
-
                     curseforge_file_ids.push(*file_id);
                 },
                 ModpackFileSource::Builtin { .. } => {},
@@ -1190,12 +1208,15 @@ impl BackendState {
             let tracker = modal_action.push_tracker("Requesting download URLs from CurseForge".into());
             tracker.set_total(1);
 
-            let files_result = self.meta.fetch(&CurseforgeGetFilesMetadataItem(&CurseforgeGetFilesRequest {
+            let files_result = self.meta.fetch(CurseforgeGetFilesMetadataItem(&CurseforgeGetFilesRequest {
                 file_ids: curseforge_file_ids,
             })).await;
 
             tracker.set_count(1);
             tracker.set_finished(ProgressTrackerFinishType::from_err(files_result.is_err()));
+
+            let mut manual_download_files = Vec::new();
+            let mut manual_download_tasks = Vec::new();
 
             if let Ok(files) = files_result {
                 for file in files.data.iter() {
@@ -1234,8 +1255,26 @@ impl BackendState {
                             content_source: ContentSource::CurseforgeProject { project_id: file.mod_id },
                             reason: ContentInstallReason::Modpack,
                         });
+                    } else {
+                        manual_download_files.push((file.clone(), hash));
+                        manual_download_tasks.push(self.meta.fetch(CurseforgeProjectItem { project_id: file.mod_id }));
                     }
                 }
+            }
+
+            if !manual_download_tasks.is_empty() {
+                let curseforge_projects = futures::future::join_all(manual_download_tasks).await;
+
+                let zipped = curseforge_projects.into_iter().zip(manual_download_files.into_iter());
+                for (project, (file, hash)) in zipped {
+                    let Ok(project) = project else {
+                        continue;
+                    };
+
+                    manual_downloads.push(ManualCurseforgeDownload::new(&file, &project, hash));
+                }
+
+
             }
         }
 
@@ -1247,7 +1286,31 @@ impl BackendState {
                 files: content_install_files.into(),
             };
 
-            self.install_content(content_install, modal_action.clone()).await;
+            if !manual_downloads.is_empty() {
+                // Unstall content & show manual downloads
+                let tracker = modal_action.push_tracker("Waiting for manual downloads".into());
+                tracker.add_total(1);
+                _ = futures::join! {
+                    self.install_content(content_install, modal_action.clone()),
+                    async move {
+                        self.create_manual_curseforge_download_session(manual_downloads.clone()).await;
+                        tracker.add_count(1);
+                        tracker.set_finished(ProgressTrackerFinishType::Normal);
+                    },
+                };
+            } else {
+                // Install content
+                self.install_content(content_install, modal_action.clone()).await;
+            }
+            true
+        } else if !manual_downloads.is_empty() {
+            // Show manual downloads
+            let tracker = modal_action.push_tracker("Waiting for manual downloads".into());
+            tracker.add_total(1);
+            self.create_manual_curseforge_download_session(manual_downloads.clone()).await;
+            tracker.add_count(1);
+            tracker.set_finished(ProgressTrackerFinishType::Normal);
+
             true
         } else {
             false

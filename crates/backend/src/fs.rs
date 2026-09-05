@@ -46,14 +46,16 @@ pub fn unique_name<'a>(parent: &Path, original_name: &'a str, is_dir: bool) -> C
     Cow::Owned(format!("{stem} ({}){ext}", Uuid::new_v4()))
 }
 
-pub(crate) fn check_sha1_hash(path: &Path, expected_hash: [u8; 20]) -> std::io::Result<bool> {
+pub(crate) fn get_sha1_hash(path: &Path) -> std::io::Result<[u8; 20]> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha1::new();
     let _ = std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().try_into().expect("expected sha1 hash to be 20 bytes"))
+}
 
-    let actual_hash = hasher.finalize();
-
-    Ok(expected_hash == *actual_hash)
+pub(crate) fn check_sha1_hash(path: &Path, expected_hash: [u8; 20]) -> std::io::Result<bool> {
+    let actual_hash = get_sha1_hash(path)?;
+    Ok(expected_hash == actual_hash)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -233,6 +235,15 @@ pub fn copy_content_recursive(from: &Path, to: &Path, strict: bool, progress: &d
             let Ok(relative) = path.strip_prefix(&from) else {
                 return Err(Error::new(ErrorKind::Other, format!("{path:?} is not a child of {from:?}")));
             };
+            #[cfg(windows)]
+            if let Ok(target) = junction::get_target(&path) {
+                if let Ok(internal) = target.strip_prefix(&from) {
+                    internal_junctions.push((relative.to_path_buf(), internal.to_path_buf()));
+                } else {
+                    external_junctions.push((relative.to_path_buf(), target));
+                }
+                continue;
+            }
             if file_type.is_symlink() {
                 let target = std::fs::read_link(&path)?;
                 if let Ok(internal) = target.strip_prefix(&from) {
@@ -246,16 +257,6 @@ pub fn copy_content_recursive(from: &Path, to: &Path, strict: bool, progress: &d
                 total_bytes += metadata.len();
 
             } else if file_type.is_dir() {
-                #[cfg(windows)]
-                if let Ok(target) = junction::get_target(&path) {
-                    if let Ok(internal) = target.strip_prefix(&from) {
-                        internal_junctions.push((relative.to_path_buf(), internal.to_path_buf()));
-                    } else {
-                        external_junctions.push((relative.to_path_buf(), target));
-                    }
-                    continue;
-                }
-
                 if depth >= 256 {
                     return Err(ErrorKind::QuotaExceeded.into());
                 }
@@ -377,12 +378,18 @@ pub fn rename_with_fallback_across_devices(from: &Path, to: &Path) -> std::io::R
     }
     if let Err(err) = std::fs::rename(from, to) {
         if err.kind() == ErrorKind::CrossesDevices {
+            #[cfg(windows)]
+            if let Ok(true) = junction::exists(&from) {
+                // Junction points cannot be made across devices, so return the CrossesDevices error
+                return Err(err);
+            }
             // Obviously this is racy, but this is the best we can do
-            if from.is_symlink() {
+            let file_type = std::fs::symlink_metadata(from)?.file_type();
+            if file_type.is_symlink() {
                 let target = std::fs::read_link(from)?;
                 symlink_dir_or_file(&target, to)?;
                 _ = std::fs::remove_file(from);
-            } else if from.is_dir() {
+            } else if file_type.is_dir() {
                 std::fs::create_dir(to)?;
                 if let Err(err) = copy_content_recursive(from, to, true, &|_, _| {}) {
                     _ = std::fs::remove_dir_all(to);
@@ -391,7 +398,7 @@ pub fn rename_with_fallback_across_devices(from: &Path, to: &Path) -> std::io::R
                     _ = std::fs::remove_dir_all(from);
                     return Ok(());
                 }
-            } else if from.is_file() {
+            } else if file_type.is_file() {
                 std::fs::copy(from, to)?;
                 _ = std::fs::remove_file(from);
             } else {

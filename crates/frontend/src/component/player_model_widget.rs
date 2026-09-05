@@ -4,7 +4,7 @@ use gpui::{prelude::*, *};
 use gpui_component::{Selectable, Sizable, button::Button, h_flex, slider::{Slider, SliderEvent, SliderState}, v_flex};
 use schema::{minecraft_profile::SkinVariant, unique_bytes::UniqueBytes};
 
-use crate::{component::player_model::{self, PlayerModel, PlayerModelState}, icon::PandoraIcon};
+use crate::{component::player_model::{self, PlayerModel, PlayerModelState}, icon::PandoraIcon, interface_config::InterfaceConfig};
 
 pub struct PlayerModelWidget {
     player_model_state: Entity<PlayerModelState>,
@@ -231,6 +231,17 @@ impl Render for PlayerModelWidget {
                         widget.last_drag = Some(event.event.position);
                     }
                 }))
+                .on_scroll_wheel(cx.listener({
+                    |widget, event: &ScrollWheelEvent, _, cx| {
+                        App::notify(cx, widget.player_model_state.entity_id());
+                        let delta = match event.delta {
+                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32().signum() as i32,
+                            ScrollDelta::Lines(lines) => lines.y.signum() as i32,
+                        };
+                        let config = InterfaceConfig::get_mut(cx);
+                        config.player_model_zoom = (config.player_model_zoom + delta * 5).clamp(50, 400);
+                    }
+                }))
             )
             .child(v_flex().p_4().w_full()
                 .child(h_flex()
@@ -238,7 +249,7 @@ impl Render for PlayerModelWidget {
                     .gap_2()
                     .pb_2()
                     .child(Button::new("classic")
-                        .label("Classic")
+                        .label(t::skins::player_model::classic())
                         .flex_1()
                         .selected(self.variant == SkinVariant::Classic)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -248,7 +259,7 @@ impl Render for PlayerModelWidget {
                             });
                         })))
                     .child(Button::new("slim")
-                        .label("Slim")
+                        .label(t::skins::player_model::slim())
                         .flex_1()
                         .selected(self.variant == SkinVariant::Slim)
                         .on_click(cx.listener(|this, _, _, cx| {

@@ -80,11 +80,11 @@ struct ExportInstanceData {
 impl ExportInstanceData {
     async fn determine_loader_version(&self, backend: &BackendState) -> Option<Ustr> {
         match self.configuration.loader {
-            Loader::Fabric => backend.meta.fetch(&FabricLoaderManifestMetadataItem).await.ok()
+            Loader::Fabric => backend.meta.fetch(FabricLoaderManifestMetadataItem).await.ok()
                 .and_then(|manifest| self.configuration.determine_fabric_loader_version(&manifest)),
-            Loader::Forge => backend.meta.fetch(&ForgeInstallerMavenMetadataItem).await.ok()
+            Loader::Forge => backend.meta.fetch(ForgeInstallerMavenMetadataItem).await.ok()
                 .and_then(|manifest| self.configuration.determine_forge_loader_version(&manifest)),
-            Loader::NeoForge => backend.meta.fetch(&NeoforgeInstallerMavenMetadataItem).await.ok()
+            Loader::NeoForge => backend.meta.fetch(NeoforgeInstallerMavenMetadataItem).await.ok()
                 .and_then(|manifest| self.configuration.determine_neoforge_loader_version(&manifest)),
             Loader::Vanilla => None,
         }
@@ -529,7 +529,7 @@ async fn resolve_modrinth_files(
 
     let response: Arc<ModrinthVersionsFromHashesResponse> = backend
         .meta
-        .fetch(&ModrinthVersionsFromHashesMetadataItem(&request))
+        .fetch(ModrinthVersionsFromHashesMetadataItem(&request))
         .await
         .map_err(|e| format!("Error resolving Modrinth versions: {}", e))?;
 
@@ -555,7 +555,7 @@ async fn resolve_modrinth_files(
         let req = ModrinthProjectsRequest { ids: ids_vec.into() };
         let projects: Arc<schema::modrinth::ModrinthProjectsResponse> = backend
             .meta
-            .fetch(&ModrinthProjectsMetadataItem(&req))
+            .fetch(ModrinthProjectsMetadataItem(&req))
             .await
             .map_err(|e| format!("Error resolving Modrinth projects: {}", e))?;
 
@@ -650,7 +650,7 @@ async fn resolve_curseforge_files(
     let request = CurseforgeFingerprintRequest { fingerprints };
     let response: Arc<CurseforgeFingerprintResponse> = backend
         .meta
-        .fetch(&CurseforgeFingerprintMetadataItem(&request))
+        .fetch(CurseforgeFingerprintMetadataItem(&request))
         .await
         .map_err(|e| match e {
             MetaLoadError::NonOK(code) => format!("CurseForge API error: {code}"),

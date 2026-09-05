@@ -204,6 +204,12 @@ impl Processor {
                     }
                 });
             },
+            MessageToFrontend::ManualCurseforgeDownloadsRequired { request: _ } => {
+                self.with_main_window(message, cx, |_processor, message, window, cx| {
+                    let MessageToFrontend::ManualCurseforgeDownloadsRequired { request } = message else { unreachable!() };
+                    crate::modals::manual_curseforge_downloads::open(request, window, cx);
+                });
+            },
             MessageToFrontend::OpenOrFocusMainWindow => {
                 self.quit_coordinator.set_can_quit(false);
 
