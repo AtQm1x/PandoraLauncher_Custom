@@ -12,9 +12,9 @@ pub struct YggdrasilClient {
 pub enum YggdrasilError {
     #[error("Connection error: {0}")]
     ConnectionError(#[from] reqwest::Error),
-    #[error("Serialization error")]
-    SerializationError,
-    #[error("Non-OK HTTP status: {0}")]
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+    #[error("Server returned HTTP {0}")]
     NonOkHttpStatus(reqwest::StatusCode),
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -82,13 +82,48 @@ struct YggdrasilValidateRequest<'a> {
     client_token: &'a str,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct YggdrasilErrorResponse {
     #[serde(default)]
     error_message: Option<String>,
     #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    cause: Option<String>,
+}
+
+impl YggdrasilErrorResponse {
+    fn into_error_string(self, status: reqwest::StatusCode) -> String {
+        let err_msg = self.error_message.or(self.message);
+        let msg = match (self.error, err_msg) {
+            (Some(err_type), Some(msg)) => format!("{}: {}", err_type, msg),
+            (None, Some(msg)) => msg,
+            (Some(err_type), None) => err_type,
+            (None, None) => format!("HTTP {}", status),
+        };
+        if let Some(cause) = self.cause {
+            format!("{} ({})", msg, cause)
+        } else {
+            msg
+        }
+    }
+}
+
+async fn parse_error_response(response: reqwest::Response) -> YggdrasilError {
+    let status = response.status();
+    if let Ok(text) = response.text().await {
+        if let Ok(err) = serde_json::from_str::<YggdrasilErrorResponse>(&text) {
+            return YggdrasilError::AuthenticationFailed(err.into_error_string(status));
+        }
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && trimmed.len() < 300 && !trimmed.starts_with('<') {
+            return YggdrasilError::AuthenticationFailed(format!("HTTP {}: {}", status, trimmed));
+        }
+    }
+    YggdrasilError::NonOkHttpStatus(status)
 }
 
 impl YggdrasilClient {
@@ -121,18 +156,11 @@ impl YggdrasilClient {
         let response = self.client.post(&url).json(&request).send().await?;
 
         if response.status() != reqwest::StatusCode::OK {
-            let status = response.status();
-            if let Ok(bytes) = response.bytes().await {
-                if let Ok(err) = serde_json::from_slice::<YggdrasilErrorResponse>(&bytes) {
-                    let msg = err.error_message.or(err.error).unwrap_or_else(|| format!("HTTP {}", status));
-                    return Err(YggdrasilError::AuthenticationFailed(msg));
-                }
-            }
-            return Err(YggdrasilError::NonOkHttpStatus(status));
+            return Err(parse_error_response(response).await);
         }
 
         let bytes = response.bytes().await?;
-        serde_json::from_slice(&bytes).map_err(|_| YggdrasilError::SerializationError)
+        serde_json::from_slice(&bytes).map_err(YggdrasilError::SerializationError)
     }
 
     /// Refresh an existing Yggdrasil access token.
@@ -153,18 +181,11 @@ impl YggdrasilClient {
         let response = self.client.post(&url).json(&request).send().await?;
 
         if response.status() != reqwest::StatusCode::OK {
-            let status = response.status();
-            if let Ok(bytes) = response.bytes().await {
-                if let Ok(err) = serde_json::from_slice::<YggdrasilErrorResponse>(&bytes) {
-                    let msg = err.error_message.or(err.error).unwrap_or_else(|| format!("HTTP {}", status));
-                    return Err(YggdrasilError::AuthenticationFailed(msg));
-                }
-            }
-            return Err(YggdrasilError::NonOkHttpStatus(status));
+            return Err(parse_error_response(response).await);
         }
 
         let bytes = response.bytes().await?;
-        serde_json::from_slice(&bytes).map_err(|_| YggdrasilError::SerializationError)
+        serde_json::from_slice(&bytes).map_err(YggdrasilError::SerializationError)
     }
 
     /// Validate an existing Yggdrasil access token. Returns true if valid, false otherwise.
@@ -204,3 +225,42 @@ impl YggdrasilClient {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_response_formatting() {
+        let err = YggdrasilErrorResponse {
+            error_message: Some("Invalid credentials. Invalid username or password.".into()),
+            message: None,
+            error: Some("ForbiddenOperationException".into()),
+            cause: None,
+        };
+        assert_eq!(
+            err.into_error_string(reqwest::StatusCode::FORBIDDEN),
+            "ForbiddenOperationException: Invalid credentials. Invalid username or password."
+        );
+
+        let err2 = YggdrasilErrorResponse {
+            error_message: None,
+            message: Some("Invalid email or password".into()),
+            error: None,
+            cause: Some("Bad credentials".into()),
+        };
+        assert_eq!(
+            err2.into_error_string(reqwest::StatusCode::UNAUTHORIZED),
+            "Invalid email or password (Bad credentials)"
+        );
+    }
+
+    #[test]
+    fn test_parse_profile_uuid() {
+        let unhyphenated = "4566e69f3c7343029f4297a7da9336b9";
+        let parsed = YggdrasilClient::parse_profile_uuid(unhyphenated);
+        assert!(parsed.is_some());
+        assert_eq!(parsed.unwrap().to_string(), "4566e69f-3c73-4302-9f42-97a7da9336b9");
+    }
+}
+

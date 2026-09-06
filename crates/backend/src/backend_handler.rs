@@ -2421,24 +2421,23 @@ impl BackendState {
         modal_action: &ModalAction,
     ) {
         log::info!("Attempting to add authlib-injector account for email: {}, server: {}", email, server_url);
+        let tracker = modal_action.push_tracker("Authenticating with Authlib server".into());
         match self.authlib_injector_authenticate(email, password, server_url).await {
             Ok((response, uuid)) => {
                 log::info!("Successfully authenticated authlib-injector account. UUID: {:?}", uuid);
-                let uuid = uuid.unwrap_or_else(|| uuid::Uuid::new_v4());
                 
                 let mut credentials = AccountCredentials::default();
                 credentials.yggdrasil_access_token = Some(response.access_token.clone());
                 credentials.yggdrasil_client_token = Some(response.client_token.clone());
+                credentials.yggdrasil_server_url = Some(server_url.trim().trim_end_matches('/').to_string().into());
                 
                 if let Some(secret_storage) = self.get_secret_storage(Some(modal_action)).await {
                     if let Err(e) = secret_storage.write_credentials(uuid, &credentials).await {
-                        log::error!("Failed to save credentials for authlib-injector account: {}", e);
-                        modal_action.set_finished_with_error(format!("Failed to save credentials: {}", e).into());
-                        return;
+                        log::warn!("Unable to write credentials to keychain: {e}");
+                        self.send.send_warning("Unable to write credentials to keychain. You might need to fully log in again next time");
+                    } else {
+                        log::info!("Successfully saved credentials for authlib-injector account");
                     }
-                    log::info!("Successfully saved credentials for authlib-injector account");
-                } else {
-                    log::warn!("Warning: secret storage is not available");
                 }
 
                 let username = response.selected_profile.as_ref()
@@ -2449,7 +2448,7 @@ impl BackendState {
                 log::info!("Determined username: {}", username);
 
                 let mut skin_url = None;
-                let session_url = format!("{}/sessionserver/session/minecraft/profile/{}", server_url, uuid.simple());
+                let session_url = format!("{}/sessionserver/session/minecraft/profile/{}", server_url.trim().trim_end_matches('/'), uuid.simple());
                 if let Ok(response) = self.http_client.get(&session_url).send().await {
                     if let Ok(body) = response.text().await {
                         skin_url = BackendState::extract_skin_url_from_profile(&body);
@@ -2463,7 +2462,7 @@ impl BackendState {
                         username,
                         offline: false,
                         head: None,
-                        authlib_injector_url: Some(server_url.to_string()),
+                        authlib_injector_url: Some(server_url.trim().trim_end_matches('/').to_string()),
                     });
                     account_info.selected_account = Some(uuid);
                 });
@@ -2474,12 +2473,13 @@ impl BackendState {
                 }
 
                 self.send.send(account_info.get().create_update_message());
-                self.send.send(MessageToFrontend::CloseModal);
+                tracker.set_finished(ProgressTrackerFinishType::Normal);
                 modal_action.set_finished();
                 log::info!("Successfully completed add_authlib_injector_account");
             }
             Err(e) => {
                 log::error!("Error in authlib_injector_authenticate: {}", e);
+                tracker.set_finished(ProgressTrackerFinishType::Error);
                 modal_action.set_finished_with_error(e.into());
             }
         }

@@ -722,10 +722,24 @@ impl BackendState {
         email: &str,
         password: &str,
         authlib_url: &str,
-    ) -> Result<(auth::yggdrasil::YggdrasilAuthenticateResponse, Option<Uuid>), String> {
+    ) -> Result<(auth::yggdrasil::YggdrasilAuthenticateResponse, Uuid), String> {
+        let authlib_url = authlib_url.trim().trim_end_matches('/');
+        if authlib_url.is_empty() {
+            return Err("Authlib server URL cannot be empty".into());
+        }
+        if !authlib_url.starts_with("http://") && !authlib_url.starts_with("https://") {
+            return Err("Authlib server URL must start with http:// or https://".into());
+        }
+        if email.trim().is_empty() {
+            return Err("Email cannot be empty".into());
+        }
+        if password.is_empty() {
+            return Err("Password cannot be empty".into());
+        }
+
         log::info!("authlib_injector_authenticate called with email: {}, authlib_url: {}", email, authlib_url);
         let client = auth::yggdrasil::YggdrasilClient::new(self.http_client.clone());
-        let yggdrasil_response = match client.authenticate(authlib_url, email, password, "PandoraLauncher").await {
+        let yggdrasil_response = match client.authenticate(authlib_url, email.trim(), password, "PandoraLauncher").await {
             Ok(response) => {
                 log::info!("YggdrasilClient::authenticate succeeded. Response profiles: {:?}", response.available_profiles.as_ref().map(|p| p.len()));
                 response
@@ -736,17 +750,18 @@ impl BackendState {
             }
         };
 
-        // Determine the UUID
-        let uuid = yggdrasil_response.selected_profile.as_ref()
-            .or_else(|| yggdrasil_response.available_profiles.as_ref().and_then(|p| p.first()))
-            .map(|p| {
-                if let Ok(parsed) = uuid::Uuid::parse_str(&p.id) {
-                    log::info!("Parsed UUID from profile id: {}", p.id);
-                    parsed
-                } else {
-                    log::info!("Failed to parse UUID from profile id: {}, generating new v4 UUID", p.id);
-                    uuid::Uuid::new_v4()
-                }
+        // Determine the profile and UUID
+        let profile = yggdrasil_response.selected_profile.as_ref()
+            .or_else(|| yggdrasil_response.available_profiles.as_ref().and_then(|p| p.first()));
+
+        let Some(profile) = profile else {
+            return Err("Authentication succeeded, but no Minecraft profile was found on this server. Please create a profile first.".into());
+        };
+
+        let uuid = auth::yggdrasil::YggdrasilClient::parse_profile_uuid(&profile.id)
+            .unwrap_or_else(|| {
+                log::warn!("Failed to parse UUID from profile id: {}, generating new v4 UUID", profile.id);
+                uuid::Uuid::new_v4()
             });
 
         log::info!("authlib_injector_authenticate returning success with UUID: {:?}", uuid);
@@ -759,6 +774,13 @@ impl BackendState {
         client_token: &str,
         authlib_url: &str,
     ) -> Result<auth::yggdrasil::YggdrasilRefreshResponse, String> {
+        let authlib_url = authlib_url.trim().trim_end_matches('/');
+        if authlib_url.is_empty() {
+            return Err("Authlib server URL cannot be empty".into());
+        }
+        if !authlib_url.starts_with("http://") && !authlib_url.starts_with("https://") {
+            return Err("Authlib server URL must start with http:// or https://".into());
+        }
         log::info!("authlib_injector_refresh called with authlib_url: {}", authlib_url);
         let client = auth::yggdrasil::YggdrasilClient::new(self.http_client.clone());
         match client.refresh(authlib_url, access_token, client_token).await {

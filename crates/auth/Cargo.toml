@@ -16,6 +16,7 @@ uuid.workspace = true
 tokio.workspace = true
 httparse.workspace = true
 log.workspace = true
+directories.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 oo7 = { version = "0.6", default-features = false, features = ["native_crypto", "async-std"] }

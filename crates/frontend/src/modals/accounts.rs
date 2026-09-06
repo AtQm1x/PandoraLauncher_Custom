@@ -290,19 +290,34 @@ impl Render for Accounts {
                         let server = server_input.read(cx).value();
                         let email = email_input.read(cx).value();
                         let password = password_input.read(cx).value();
-                        let valid = !email.is_empty() && !password.is_empty() && !server.is_empty();
+                        let valid = !email.trim().is_empty()
+                            && !password.is_empty()
+                            && !server.trim().is_empty()
+                            && (server.trim().starts_with("http://") || server.trim().starts_with("https://"));
 
                         let backend_handle_clone = backend_handle.clone();
-                        let mut add_button = Button::new("add-authlib-btn").label("Add").on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
+                        let mut add_button = Button::new("add-authlib-btn")
+                            .label(t::account::add::submit())
+                            .disabled(!valid)
+                            .on_click(move |_, window, cx| {
+                                window.close_all_dialogs(cx);
 
-                            backend_handle_clone.send(MessageToBackend::AddAuthlibInjectorAccount {
-                                email: email.clone().into(),
-                                password: password.clone().into(),
-                                server_url: server.clone().into(),
-                                modal_action: bridge::modal_action::ModalAction::default(),
+                                let modal_action = bridge::modal_action::ModalAction::default();
+                                backend_handle_clone.send(MessageToBackend::AddAuthlibInjectorAccount {
+                                    email: email.clone().trim().into(),
+                                    password: password.clone().into(),
+                                    server_url: server.clone().trim().into(),
+                                    modal_action: modal_action.clone(),
+                                });
+
+                                crate::modals::generic::show_modal(
+                                    window,
+                                    cx,
+                                    "Add Authlib Account".into(),
+                                    t::account::add::error().into(),
+                                    modal_action,
+                                );
                             });
-                        });
 
                         if valid {
                             add_button = add_button.success();

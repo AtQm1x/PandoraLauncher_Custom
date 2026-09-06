@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{MinecraftAccessToken, TokenWithExpiry, XstsToken};
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AccountCredentials {
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub msa_refresh: Option<Arc<str>>,

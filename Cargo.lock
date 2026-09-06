@@ -601,6 +601,7 @@ name = "auth"
 version = "5.3.1"
 dependencies = [
  "chrono",
+ "directories",
  "httparse",
  "log",
  "oauth2",

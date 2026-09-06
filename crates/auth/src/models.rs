@@ -13,13 +13,13 @@ impl MinecraftAccessToken {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TokenWithExpiry {
     pub token: Arc<str>,
     pub expiry: DateTime<Utc>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct XstsToken {
     pub token: Arc<str>,
     pub expiry: DateTime<Utc>,
