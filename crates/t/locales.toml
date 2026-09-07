@@ -2335,6 +2335,30 @@ ru = "Невозможно использовать песочницу: отсу
 fr = "Impossible de lancer le mode sandbox : les commandes bwrap et xdg-dbus-proxy sont manquantes"
 it = "Impossibile isolare: mancano i comandi bwrap e xdg-dbus-proxy"
 
+[instance.automodpack.label]
+en = "AutoModpack"
+pl = "AutoModpack"
+de = "AutoModpack"
+hu = "AutoModpack"
+sv = "AutoModpack"
+ru = "AutoModpack"
+fr = "AutoModpack"
+it = "AutoModpack"
+[instance.automodpack.enable]
+en = "Allow AutoModpack to manage mods"
+pl = "Zezwól AutoModpack na zarządzanie modami"
+de = "AutoModpack das Verwalten von Mods erlauben"
+ru = "Разрешить AutoModpack управлять модами"
+fr = "Autoriser AutoModpack à gérer les mods"
+it = "Consenti ad AutoModpack di gestire le mod"
+[instance.automodpack.tooltip]
+en = "Keeps mod changes persistent across game restarts, allowing AutoModpack to install, update, and clean up modpack files without getting reset."
+pl = "Zachowuje zmiany modów między restartami gry, umożliwiając AutoModpack instalowanie, aktualizowanie i usuwanie plików paczki modów bez ich resetowania."
+de = "Behält Mod-Änderungen über Neustarts hinweg bei, sodass AutoModpack Modpack-Dateien installieren, aktualisieren und bereinigen kann, ohne zurückgesetzt zu werden."
+ru = "Сохраняет изменения модов при перезапусках игры, позволяя AutoModpack устанавливать, обновлять и очищать файлы модпака без их сброса."
+fr = "Conserve les modifications de mods lors des redémarrages du jeu, permettant à AutoModpack d'installer, de mettre à jour et de nettoyer les fichiers sans réinitialisation."
+it = "Mantiene le modifiche alle mod tra i riavvii del gioco, consentendo ad AutoModpack di installare, aggiornare e ripulire i file del modpack senza ripristinarli."
+
 [instance.update_channel.label]
 en = "Update Channel"
 ru = "Канал обновления"

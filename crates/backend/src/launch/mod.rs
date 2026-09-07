@@ -2336,12 +2336,18 @@ impl LaunchContext {
 
             command.spawn_sandboxed(PandoraSandbox {
                 allow_read,
-                allow_write: vec![
-                    self.game_dir.clone(),
-                    self.natives_dir.clone().into(),
-                    self.synced_dir.clone(),
-                    self.assets_root.clone(),
-                ],
+                allow_write: {
+                    let mut writes = vec![
+                        self.game_dir.clone(),
+                        self.natives_dir.clone().into(),
+                        self.synced_dir.clone(),
+                        self.assets_root.clone(),
+                    ];
+                    if let Some(instance_dir) = self.game_dir.parent() {
+                        writes.push(instance_dir.into());
+                    }
+                    writes
+                },
                 is_jvm: true,
                 grant_network_access: true,
                 #[cfg(target_os = "linux")]

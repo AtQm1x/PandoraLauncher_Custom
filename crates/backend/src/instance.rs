@@ -83,6 +83,10 @@ impl ContentFolderState {
             summaries: None,
         }
     }
+
+    pub fn summaries(&self) -> Option<&Arc<[InstanceContentSummary]>> {
+        self.summaries.as_ref()
+    }
 }
 
 impl Id for InstanceID {
@@ -968,6 +972,15 @@ impl Instance {
 
     pub fn set_frozen_mods_folder(&mut self, frozen_mods_folder: bool) {
         self.frozen_mods_folder = frozen_mods_folder;
+    }
+
+    pub fn is_frozen_mods_folder(&self) -> bool {
+        self.frozen_mods_folder
+    }
+
+    pub fn mark_content_folder_dirty(&mut self, content_folder: ContentFolder) {
+        self.content_state[content_folder].dirty_paths.dirty_all();
+        self.content_state[content_folder].load_state.set_dirty();
     }
 }
 

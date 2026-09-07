@@ -166,6 +166,13 @@ impl BackendState {
                     });
                 }
             },
+            MessageToBackend::SetInstanceAutomodpack { id, automodpack } => {
+                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                    instance.configuration.modify(|configuration| {
+                        configuration.automodpack = automodpack;
+                    });
+                }
+            },
             MessageToBackend::SetInstanceMemory { id, memory } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                     instance.configuration.modify(|configuration| {

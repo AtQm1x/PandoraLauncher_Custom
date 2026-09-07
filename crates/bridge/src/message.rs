@@ -120,6 +120,10 @@ pub enum MessageToBackend {
         id: InstanceID,
         sandbox: bool,
     },
+    SetInstanceAutomodpack {
+        id: InstanceID,
+        automodpack: bool,
+    },
     SetInstanceMemory {
         id: InstanceID,
         memory: InstanceMemoryConfiguration,

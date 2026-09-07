@@ -41,6 +41,7 @@ pub struct InstanceSettingsSubpage {
     disable_file_syncing: bool,
     sandbox_available: bool,
     sandbox: bool,
+    automodpack: bool,
 
     memory_override_enabled: bool,
     memory_min_input_state: Entity<InputState>,
@@ -99,6 +100,7 @@ impl InstanceSettingsSubpage {
         let account = entry.configuration.preferred_account;
         let disable_file_syncing = entry.configuration.disable_file_syncing;
         let sandbox = entry.configuration.sandbox;
+        let automodpack = entry.configuration.automodpack;
 
         let sandbox_available = if cfg!(target_os = "linux") {
             command::is_command_available("bwrap") && command::is_command_available("xdg-dbus-proxy")
@@ -238,6 +240,7 @@ impl InstanceSettingsSubpage {
             disable_file_syncing,
             sandbox_available,
             sandbox,
+            automodpack,
             memory_override_enabled: memory.enabled,
             memory_min_input_state,
             memory_max_input_state,
@@ -911,6 +914,20 @@ impl Render for InstanceSettingsSubpage {
                         sandbox: *value
                     });
                 }))
+            ))
+            .child(crate::labelled(
+                t::instance::automodpack::label(),
+                Checkbox::new("automodpack")
+                    .label(t::instance::automodpack::enable())
+                    .tooltip(t::instance::automodpack::tooltip())
+                    .checked(self.automodpack)
+                    .on_click(cx.listener(|page, value, _, _| {
+                        page.automodpack = *value;
+                        page.backend_handle.send(MessageToBackend::SetInstanceAutomodpack {
+                            id: page.instance_id,
+                            automodpack: *value
+                        });
+                    }))
             ));
 
         let runtime_content = v_flex()

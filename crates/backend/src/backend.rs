@@ -24,7 +24,7 @@ use ustr::Ustr;
 use uuid::Uuid;
 
 use crate::{
-    account::{BackendAccountInfo, MinecraftLoginInfo}, curseforge_manual_download::ManualCurseforgeDownloadSession, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeProjectItem, MinecraftVersionManifestMetadataItem}, manager::MetadataManager}, mod_metadata::ModMetadataManager, persistent::Persistent, server_list_pinger::ServerListPinger, skin_manager::SkinManager
+    account::{BackendAccountInfo, MinecraftLoginInfo}, curseforge_manual_download::ManualCurseforgeDownloadSession, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeProjectItem, FabricLoaderManifestMetadataItem, ForgeInstallerMavenMetadataItem, MinecraftVersionManifestMetadataItem, NeoforgeInstallerMavenMetadataItem}, manager::MetadataManager}, mod_metadata::ModMetadataManager, persistent::Persistent, server_list_pinger::ServerListPinger, skin_manager::SkinManager
 };
 
 fn build_http_clients(user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) -> (reqwest::Client, reqwest::Client) {
@@ -825,8 +825,34 @@ impl BackendState {
         }
 
         let original_mods_dir = instance.root_path.join("original_mods");
+
+        let is_automodpack = instance.configuration.get().automodpack
+            || instance.dot_minecraft_path.join("automodpack").is_dir()
+            || instance.content_state[ContentFolder::Mods].summaries().map(|mods| {
+                mods.iter().any(|m| {
+                    m.enabled && (
+                        m.content_summary.id.as_deref().map(|id: &str| id.eq_ignore_ascii_case("automodpack")).unwrap_or(false)
+                        || m.filename.to_ascii_lowercase().contains("automodpack")
+                    )
+                })
+            }).unwrap_or(false);
+
+        if is_automodpack {
+            if original_mods_dir.exists() {
+                _ = std::fs::remove_dir_all(&original_mods_dir);
+            }
+            if instance.is_frozen_mods_folder() {
+                instance.set_frozen_mods_folder(false);
+                instance.mark_content_folder_dirty(ContentFolder::Mods);
+            }
+            return;
+        }
+
         if !original_mods_dir.exists() {
-            instance.set_frozen_mods_folder(false);
+            if instance.is_frozen_mods_folder() {
+                instance.set_frozen_mods_folder(false);
+                instance.mark_content_folder_dirty(ContentFolder::Mods);
+            }
             return;
         }
 
@@ -849,16 +875,32 @@ impl BackendState {
         }
 
         instance.set_frozen_mods_folder(false);
+        instance.mark_content_folder_dirty(ContentFolder::Mods);
+    }
+
+    pub fn is_automodpack_active(configuration: &InstanceConfiguration, mods: &[InstanceContentSummary], dot_minecraft_dir: &Path) -> bool {
+        if configuration.automodpack {
+            return true;
+        }
+        if dot_minecraft_dir.join("automodpack").is_dir() {
+            return true;
+        }
+        mods.iter().any(|m| {
+            m.enabled && (
+                m.content_summary.id.as_deref().map(|id: &str| id.eq_ignore_ascii_case("automodpack")).unwrap_or(false)
+                || m.filename.to_ascii_lowercase().contains("automodpack")
+            )
+        })
     }
 
     pub async fn prelaunch_setup_mods(self: &Arc<Self>, id: InstanceID, modal_action: &ModalAction) {
-        let (loader, minecraft_version, root_dir, dot_minecraft_dir, mods_dir) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+        let (loader, minecraft_version, root_dir, dot_minecraft_dir, mods_dir, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
             if !instance.processes.is_empty() {
                 return;
             }
 
-            let configuration = instance.configuration.get();
-            (configuration.loader, configuration.minecraft_version, instance.root_path.clone(), instance.dot_minecraft_path.clone(), instance.content_state[ContentFolder::Mods].path.clone())
+            let configuration = instance.configuration.get().clone();
+            (configuration.loader, configuration.minecraft_version, instance.root_path.clone(), instance.dot_minecraft_path.clone(), instance.content_state[ContentFolder::Mods].path.clone(), configuration)
         } else {
             return;
         };
@@ -870,6 +912,52 @@ impl BackendState {
         let Some(mods) = Instance::load_content(self.clone(), id, ContentFolder::Mods).await else {
             return;
         };
+
+        let is_automodpack = Self::is_automodpack_active(&configuration, &mods, &dot_minecraft_dir);
+
+        let original_mods_dir = root_dir.join("original_mods");
+        if original_mods_dir.exists() {
+            if !mods_dir.exists() {
+                _ = std::fs::rename(&original_mods_dir, &mods_dir);
+            } else {
+                _ = std::fs::remove_dir_all(&original_mods_dir);
+            }
+        }
+
+        if is_automodpack {
+            if configuration.preferred_loader_version.is_none() {
+                let resolved_version = match configuration.loader {
+                    Loader::Fabric => self.meta.fetch(FabricLoaderManifestMetadataItem).await.ok()
+                        .and_then(|manifest| configuration.determine_fabric_loader_version(&manifest)),
+                    Loader::Forge => self.meta.fetch(ForgeInstallerMavenMetadataItem).await.ok()
+                        .and_then(|manifest| configuration.determine_forge_loader_version(&manifest)),
+                    Loader::NeoForge => self.meta.fetch(NeoforgeInstallerMavenMetadataItem).await.ok()
+                        .and_then(|manifest| configuration.determine_neoforge_loader_version(&manifest)),
+                    Loader::Vanilla => None,
+                };
+
+                if let Some(version) = resolved_version {
+                    if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                        instance.configuration.modify(|cfg| {
+                            cfg.preferred_loader_version = Some(version);
+                        });
+                        self.send.send(instance.create_modify_message());
+                    }
+                }
+            }
+
+            let mod_copies = self.apply_modpack_and_collect_mods(loader, minecraft_version, &mods, &dot_minecraft_dir, &mods_dir, modal_action).await;
+
+            if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                instance.set_frozen_mods_folder(true);
+            }
+
+            let copy_tracker = modal_action.push_tracker("Preparing mods directory".into());
+            self.apply_copies_to_mods_dir(mod_copies, &mods_dir, &copy_tracker);
+            copy_tracker.set_finished(ProgressTrackerFinishType::Normal);
+
+            return;
+        }
 
         let mut known_files: FxHashSet<Arc<Path>> = FxHashSet::with_capacity_and_hasher(mods.len() * 2, FxBuildHasher);
         for content in mods.iter() {
