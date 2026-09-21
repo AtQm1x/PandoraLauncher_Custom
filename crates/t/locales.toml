@@ -4360,10 +4360,6 @@ en = "Shift+Click the delete instance button to skip the confirmation"
 tr = "Onayı atlamak için Shift tuşunu basılı tutarak profil silme düğmesine tıklayın"
 ru = "Удерживайте Shift при удалении экземпляра, чтобы пропустить подтверждение"
 hu = "Shift+Katt a példány törlése gombra, hogy átlépd a megerősítést"
-[settings.general.general.show_quickplay_page]
-en = "Show quickplay page"
-[settings.general.general.show_quickplay_page_desc]
-en = "Show the quickplay page in the sidebar"
 [settings.general.general.live_game_output_display]
 en = "Live game output display"
 tr = "Canlı oyun çıktısı görünümü"
@@ -4559,6 +4555,12 @@ en = "Close all other windows when the main Pandora Launcher window is closed"
 tr = "Ana Pandora Launcher penceresi kapatıldığında diğer tüm pencereleri kapat"
 ru = "Закрывать все остальные окна при закрытии главного окна Pandora Launcher"
 hu = "Minden másik ablak bezárása a fő Pandora Launcher ablak bezárásakor"
+[settings.appearance.sidebar]
+en = "Sidebar"
+[settings.appearance.sidebar.show_quickplay_page]
+en = "Show quickplay page"
+[settings.appearance.sidebar.show_quickplay_page_desc]
+en = "Show the quickplay page in the sidebar"
 
 [settings.java]
 en = "Java"

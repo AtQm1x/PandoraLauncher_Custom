@@ -356,12 +356,6 @@ impl LauncherUI {
     fn switch_page_without_history(&mut self, page: PageType, page_path: Arc<[PageType]>, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_page = None;
 
-        let page = if !InterfaceConfig::get(cx).show_quickplay_page && page == PageType::Quickplay {
-            PageType::Instances
-        } else {
-            page
-        };
-
         let config = InterfaceConfig::get_mut(cx);
         let previous_page_type = std::mem::replace(&mut config.main_page, page.clone());
         config.main_page = page.clone();
@@ -434,15 +428,10 @@ impl Render for LauncherUI {
             }
         }
 
-        let (mut page_type, hide_skins, show_quickplay_page) = {
+        let (page_type, hide_skins, show_quickplay_page) = {
             let config = InterfaceConfig::get(cx);
             (config.main_page.clone(), config.hide_skins, config.show_quickplay_page)
         };
-
-        if !show_quickplay_page && page_type == PageType::Quickplay {
-            self.switch_page_without_history(PageType::Instances, [].into(), window, cx);
-            page_type = PageType::Instances;
-        }
 
         let library_group = MenuGroup::new("Minecraft")
             .when(show_quickplay_page, |this| this.child(MenuGroupItem::new(t::quickplay::title())
