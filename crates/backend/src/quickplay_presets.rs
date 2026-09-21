@@ -332,7 +332,7 @@ impl ModSetResolver {
                             },
                             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
                                 let mut count = 0;
-                                for other_project in &self.original_projects {
+                                'other_projects: for other_project in &self.original_projects {
                                     if other_project == &v.project_id {
                                         continue;
                                     }
@@ -360,7 +360,7 @@ impl ModSetResolver {
                                                     continue;
                                                 }
                                                 count += 1;
-                                                break; // Break so we don't increase the count more than once for this dependent project
+                                                continue 'other_projects; // Break so we don't increase the count more than once for this dependent project
                                             }
                                         }
                                     }
