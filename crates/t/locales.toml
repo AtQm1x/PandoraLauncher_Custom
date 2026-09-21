@@ -4556,6 +4556,41 @@ tr = "Ana Pandora Launcher penceresi kapatıldığında diğer tüm pencereleri 
 ru = "Закрывать все остальные окна при закрытии главного окна Pandora Launcher"
 hu = "Minden másik ablak bezárása a fő Pandora Launcher ablak bezárásakor"
 
+[settings.java]
+en = "Java"
+[settings.java.defaults]
+en = "Launch Defaults"
+[settings.java.defaults.enable_memory]
+en = "Default Memory"
+[settings.java.defaults.enable_memory_desc]
+en = "Default memory limits for instances"
+[settings.java.defaults.memory_min]
+en = "Minimum Memory"
+[settings.java.defaults.memory_min_desc]
+en = "Default minimum memory in MiB"
+[settings.java.defaults.memory_max]
+en = "Maximum Memory"
+[settings.java.defaults.memory_max_desc]
+en = "Default maximum memory in MiB"
+[settings.java.defaults.enable_jvm_flags]
+en = "Default JVM Flags"
+[settings.java.defaults.enable_jvm_flags_desc]
+en = "Apply default JVM flags to instances"
+[settings.java.defaults.jvm_flags]
+en = "JVM Flags"
+[settings.java.defaults.jvm_flags_desc]
+en = "Default JVM flags to apply to every instance"
+[settings.java.defaults.enable_jvm_binary]
+en = "Default JVM Binary"
+[settings.java.defaults.enable_jvm_binary_desc]
+en = "Default JVM binary for instances"
+[settings.java.defaults.jvm_binary]
+en = "JVM Binary"
+[settings.java.defaults.jvm_binary_desc]
+en = "Path to the default Java executable"
+[settings.java.defaults.select_jvm_binary]
+en = "Select JVM Binary"
+
 [settings.network]
 en = "Network"
 tr = "Ağ"
