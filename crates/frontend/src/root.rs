@@ -265,7 +265,6 @@ pub fn start_quickplay(
     let title: SharedString = "Starting Minecraft".into();
     modals::generic::show_modal(window, cx, title, t::instance::start::error().into(), modal_action);
 
-    let window_handle = window.window_handle();
     cx.spawn(async move |cx| {
         let Ok(receiver) = receiver.await else {
             return;

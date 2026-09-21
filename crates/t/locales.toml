@@ -4557,6 +4557,10 @@ ru = "Закрывать все остальные окна при закрыт�
 hu = "Minden másik ablak bezárása a fő Pandora Launcher ablak bezárásakor"
 [settings.appearance.sidebar]
 en = "Sidebar"
+[settings.appearance.sidebar.show_sidebar_icons]
+en = "Show sidebar icons"
+[settings.appearance.sidebar.show_sidebar_icons_desc]
+en = "Show icons on the sidebar next to the text"
 [settings.appearance.sidebar.show_quickplay_page]
 en = "Show quickplay page"
 [settings.appearance.sidebar.show_quickplay_page_desc]

@@ -1,6 +1,5 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use bridge::instance::InstanceID;
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme as _, Icon, InteractiveElementExt, WindowExt, h_flex, notification::{Notification, NotificationType}, scroll::ScrollableElement, tooltip::Tooltip, v_flex
@@ -11,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     component::{generic_title_bar::TitleBarState, main_title_bar::MainTitleBar, menu::{MenuGroup, MenuGroupItem}, page_path::PagePath, resize_panel::{ResizePanel, ResizePanelState}, shrinking_text::ShrinkingText}, entity::{
-        DataEntities, account::AccountExt, instance::{InstanceAddedEvent, InstanceEntries, InstanceModifiedEvent, InstanceMovedToTopEvent, InstanceRemovedEvent}
+        DataEntities, account::AccountExt, instance::{InstanceAddedEvent, InstanceEntries, InstanceEntry, InstanceModifiedEvent, InstanceMovedToTopEvent, InstanceRemovedEvent}
     }, icon::PandoraIcon, interface_config::InterfaceConfig, pages::{curseforge_page::CurseforgeSearchPage, import::ImportPage, instance::instance_page::InstancePage, instances_page::InstancesPage, modrinth_page::ModrinthSearchPage, modrinth_project_page::ModrinthProjectPage, page::Page, quickplay::QuickplayPage, skins_page::SkinsPage, syncing_page::SyncingPage}, png_render_cache,
 };
 
@@ -20,7 +19,7 @@ pub struct LauncherUI {
     page: LauncherPage,
     pub update: Option<UpdatePrompt>,
     sidebar_state: ResizePanelState,
-    recent_instances: heapless::Vec<(InstanceID, SharedString), 3>,
+    recent_instances: heapless::Vec<InstanceEntry, 3>,
     page_history_backwards: VecDeque<(PageType, Arc<[PageType]>)>,
     page_history_forwards: Vec<(PageType, Arc<[PageType]>)>,
     previous_pages: FxHashMap<PageType, LauncherPage>,
@@ -30,6 +29,10 @@ pub struct LauncherUI {
     _instance_removed_subscription: Subscription,
     _instance_moved_to_top_subscription: Subscription,
 }
+
+pub const ICONIZED_SIDEBAR_WIDTH: f32 = 64.0;
+pub const MIN_SIDEBAR_WIDTH: f32 = 150.0;
+pub const MAX_SIDEBAR_WIDTH: f32 = 225.0;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -151,13 +154,13 @@ impl LauncherUI {
             .instances
             .read(cx)
             .entries
-            .iter()
-            .filter_map(|(id, entry)| {
-                let entry = entry.read(cx);
+            .values()
+            .filter_map(|entry| {
+                let entry = entry.read(cx).clone();
                 if entry.name == schema::quickplay::INSTANCE_NAME {
                     None
                 } else {
-                    Some((*id, entry.name.clone()))
+                    Some(entry)
                 }
             })
             .take(3)
@@ -171,13 +174,13 @@ impl LauncherUI {
                 if this.recent_instances.is_full() {
                     this.recent_instances.pop();
                 }
-                let _ = this.recent_instances.insert(0, (event.instance.id, event.instance.name.clone()));
+                let _ = this.recent_instances.insert(0, event.instance.clone());
                 cx.notify();
             });
         let _instance_modified_subscription =
             cx.subscribe_in::<_, InstanceModifiedEvent>(&data.instances, window, |this, _, event, window, cx| {
-                if let Some((_, name)) = this.recent_instances.iter_mut().find(|(id, _)| *id == event.instance.id) {
-                    *name = event.instance.name.clone();
+                if let Some(existing) = this.recent_instances.iter_mut().find(|instance| instance.id == event.instance.id) {
+                    *existing = event.instance.clone();
                     cx.notify();
                 }
                 if let LauncherPage::InstancePage(page) = &this.page
@@ -190,7 +193,7 @@ impl LauncherUI {
             });
         let _instance_removed_subscription =
             cx.subscribe_in::<_, InstanceRemovedEvent>(&data.instances, window, |this, _, event, window, cx| {
-                this.recent_instances.retain(|entry| entry.0 != event.id);
+                this.recent_instances.retain(|entry| entry.id != event.id);
 
                 if let LauncherPage::InstancePage(page) = &this.page
                     && page.read(cx).instance.read(cx).id == event.id
@@ -204,11 +207,11 @@ impl LauncherUI {
                 if event.instance.name == schema::quickplay::INSTANCE_NAME {
                     return;
                 }
-                this.recent_instances.retain(|entry| entry.0 != event.instance.id);
+                this.recent_instances.retain(|entry| entry.id != event.instance.id);
                 if this.recent_instances.is_full() {
                     this.recent_instances.pop();
                 }
-                let _ = this.recent_instances.insert(0, (event.instance.id, event.instance.name.clone()));
+                let _ = this.recent_instances.insert(0, event.instance.clone());
                 cx.notify();
             });
 
@@ -216,10 +219,19 @@ impl LauncherUI {
 
         let mut default_sidebar_width = config.sidebar_width;
         if default_sidebar_width <= 0.0 {
-            default_sidebar_width = 150.0;
+            default_sidebar_width = (MIN_SIDEBAR_WIDTH + MAX_SIDEBAR_WIDTH)/2.0;
+        } else if default_sidebar_width < MIN_SIDEBAR_WIDTH {
+            let min_distance = (default_sidebar_width - MIN_SIDEBAR_WIDTH).abs();
+            let icon_distance = (default_sidebar_width - ICONIZED_SIDEBAR_WIDTH).abs();
+            if icon_distance < min_distance {
+                default_sidebar_width = ICONIZED_SIDEBAR_WIDTH;
+            } else {
+                default_sidebar_width = MIN_SIDEBAR_WIDTH;
+            }
         }
 
         let sidebar_state = ResizePanelState::new(px(default_sidebar_width), px(150.0), px(225.0))
+            .snap_point(px(ICONIZED_SIDEBAR_WIDTH))
             .on_resize(|width, _, cx| {
                 InterfaceConfig::get_mut(cx).sidebar_width = width.as_f32();
             });
@@ -428,74 +440,186 @@ impl Render for LauncherUI {
             }
         }
 
-        let (page_type, hide_skins, show_quickplay_page) = {
+        let (page_type, show_skins, iconized_sidebar, show_sidebar_icons, show_quickplay_page) = {
             let config = InterfaceConfig::get(cx);
-            (config.main_page.clone(), config.hide_skins, config.show_quickplay_page)
+            (config.main_page.clone(), !config.hide_skins, config.sidebar_width == ICONIZED_SIDEBAR_WIDTH, config.show_sidebar_icons, config.show_quickplay_page)
         };
 
-        let library_group = MenuGroup::new("Minecraft")
-            .when(show_quickplay_page, |this| this.child(MenuGroupItem::new(t::quickplay::title())
-                .active(page_type == PageType::Quickplay)
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Quickplay, &[], window, cx);
-                }))))
-            .child(MenuGroupItem::new(t::instance::title())
-                .active(page_type == PageType::Instances)
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Instances, &[], window, cx);
-                })))
-            .when(!hide_skins, |this| this.child(MenuGroupItem::new(t::skins::title())
-                .active(page_type == PageType::Skins)
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Skins, &[], window, cx);
-                }))));
+        let page_groups: &[(&'static str, &[(bool, &'static str, PandoraIcon, PageType)])] = &[
+            ("Minecraft", &[
+                (show_quickplay_page, t::quickplay::title(), PandoraIcon::Rocket, PageType::Quickplay),
+                (true, t::instance::title(), PandoraIcon::Box, PageType::Instances),
+                (show_skins, t::skins::title(), PandoraIcon::FaceSlightlySmiling, PageType::Skins),
+            ]),
+            (t::instance::content::title(), &[
+                (true, t::modrinth::name(), PandoraIcon::CircleCheck, PageType::Modrinth { installing_for: None }),
+                (true, t::curseforge::name(), PandoraIcon::Anvil, PageType::Curseforge { installing_for: None }),
+            ]),
+            (t::instance::sync::files(), &[
+                (true, t::import::label(), PandoraIcon::Download, PageType::Import),
+                (true, t::instance::sync::label(), PandoraIcon::RefreshCcw, PageType::Syncing),
+            ]),
+        ];
 
-        let content_group = MenuGroup::new(t::instance::content::title())
-            .child(MenuGroupItem::new(t::modrinth::name())
-                .active(matches!(page_type, PageType::Modrinth { installing_for: None } | PageType::ModrinthProject { install_for: None, .. }))
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Modrinth { installing_for: None }, &[], window, cx);
-                })))
-            .child(MenuGroupItem::new(t::curseforge::name())
-                .active(matches!(page_type, PageType::Curseforge { installing_for: None }))
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Curseforge { installing_for: None }, &[], window, cx);
-                })));
+        let sidebar_pages = if !iconized_sidebar {
+            let mut groups: heapless::Vec<MenuGroup, 4> = heapless::Vec::new();
 
-        let files_group = MenuGroup::new(t::instance::sync::files())
-            .child(MenuGroupItem::new(t::import::label())
-                .active(page_type == PageType::Import)
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Import, &[], window, cx);
-                })))
-            .child(MenuGroupItem::new(t::instance::sync::label())
-                .active(page_type == PageType::Syncing)
-                .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Syncing, &[], window, cx);
-                })));
-
-        let mut groups: heapless::Vec<MenuGroup, 4> = heapless::Vec::new();
-
-        let _ = groups.push(library_group);
-        let _ = groups.push(content_group);
-        let _ = groups.push(files_group);
-
-        if !self.recent_instances.is_empty() {
-            let mut recent_instances_group = MenuGroup::new(t::instance::recent());
-
-            for (_, name) in &self.recent_instances {
-                let name = name.clone();
-                let active = page_type == PageType::InstancePage { name: name.clone() };
-                let item = MenuGroupItem::new(name.clone())
-                    .active(active)
-                    .on_click(cx.listener(move |launcher, _, window, cx| {
-                        launcher.switch_page(PageType::InstancePage { name: name.clone() }, &[PageType::Instances], window, cx);
-                    }));
-                recent_instances_group = recent_instances_group.child(item);
+            for (group_name, group_entries) in page_groups {
+                let mut group = MenuGroup::new(*group_name);
+                for (show, title, icon, page) in *group_entries {
+                    if !*show {
+                        continue;
+                    }
+                    let page = page.clone();
+                    group = group.child(MenuGroupItem::new(*title)
+                        .when(show_sidebar_icons, |this| this.icon(icon.clone()))
+                        .active(page_type == page)
+                        .on_click(cx.listener(move |launcher, _, window, cx| {
+                            launcher.switch_page(page.clone(), &[], window, cx);
+                        })));
+                }
+                let _ = groups.push(group);
             }
 
-            let _ = groups.push(recent_instances_group);
-        }
+            if !self.recent_instances.is_empty() {
+                let mut recent_instances_group = MenuGroup::new(t::instance::recent());
+
+                for instance in &self.recent_instances {
+                    let name = instance.name.clone();
+                    let active = page_type == PageType::InstancePage { name: name.clone() };
+                    let item = MenuGroupItem::new(name.clone())
+                        .when(show_sidebar_icons, |this| {
+                            let size = (window.rem_size().as_f32() * 0.875).round() as u32;
+                            let size_px = px(size as f32);
+                            let icon = if let Some(icon) = instance.icon.clone() {
+                                let transform = png_render_cache::ImageTransformation::Resize { width: size, height: size };
+                                png_render_cache::render_with_transform(icon, transform, cx)
+                                    .rounded(cx.theme().radius).size(size_px).min_w(size_px).min_h(size_px).into_any_element()
+                            } else {
+                                let icon_path = instance.configuration.instance_fallback_icon
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("icons/box.svg");
+                                Icon::default().path(icon_path).size(size_px).min_w(size_px).min_h(size_px).into_any_element()
+                            };
+                            this.icon(icon)
+                        })
+                        .active(active)
+                        .on_click(cx.listener(move |launcher, _, window, cx| {
+                            launcher.switch_page(PageType::InstancePage { name: name.clone() }, &[PageType::Instances], window, cx);
+                        }));
+                    recent_instances_group = recent_instances_group.child(item);
+                }
+
+                let _ = groups.push(recent_instances_group);
+            }
+
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .px_3()
+                .gap_y_3()
+                .children(groups)
+                .overflow_y_scrollbar()
+                .into_any_element()
+        } else {
+            let mut groups = Vec::new();
+
+            for (_group_name, group_entries) in page_groups {
+                let mut group = v_flex()
+                    .items_center().min_w_full().max_w_full().w_full()
+                    .min_h_0()
+                    .gap_y_0p5();
+                for (show, title, icon, page) in *group_entries {
+                    if !*show {
+                        continue;
+                    }
+                    let title = *title;
+                    let page = page.clone();
+                    group = group.child(div()
+                        .id(title)
+                        .p_2()
+                        .rounded(cx.theme().radius)
+                        .when_else(page_type == page, |this| {
+                            this.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().sidebar_accent_foreground)
+                        }, |this| {
+                            this.hover(|this| {
+                                this.bg(cx.theme().sidebar_accent)
+                                    .text_color(cx.theme().sidebar_accent_foreground)
+                            })
+                        })
+                        .child(icon.clone())
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(title).build(window, cx)
+                        })
+                        .on_click(cx.listener(move |launcher, _, window, cx| {
+                            launcher.switch_page(page.clone(), &[], window, cx);
+                        })));
+                }
+                groups.push(group.into_any_element());
+            }
+
+            if !self.recent_instances.is_empty() {
+                let mut group = v_flex()
+                    .items_center().min_w_full().max_w_full().w_full()
+                    .min_h_0()
+                    .gap_y_0p5();
+
+                for instance in &self.recent_instances {
+                    let name = instance.name.clone();
+                    let active = page_type == PageType::InstancePage { name: name.clone() };
+
+                    let size = window.rem_size().as_f32().round() as u32;
+                    let size_px = px(size as f32);
+                    let icon = if let Some(icon) = instance.icon.clone() {
+                        let transform = png_render_cache::ImageTransformation::Resize { width: size, height: size };
+                        png_render_cache::render_with_transform(icon, transform, cx)
+                            .rounded(cx.theme().radius).size(size_px).min_w(size_px).min_h(size_px).into_any_element()
+                    } else {
+                        let icon_path = instance.configuration.instance_fallback_icon
+                            .map(|s| s.as_str())
+                            .unwrap_or("icons/box.svg");
+                        Icon::default().path(icon_path).size(size_px).min_w(size_px).min_h(size_px).into_any_element()
+                    };
+
+                    group = group.child(div()
+                        .id(name.clone())
+                        .p_2()
+                        .rounded(cx.theme().radius)
+                        .when_else(active, |this| {
+                            this.bg(cx.theme().sidebar_accent)
+                                .text_color(cx.theme().sidebar_accent_foreground)
+                        }, |this| {
+                            this.hover(|this| {
+                                this.bg(cx.theme().sidebar_accent)
+                                    .text_color(cx.theme().sidebar_accent_foreground)
+                            })
+                        })
+                        .child(icon)
+                        .tooltip({
+                            let name = name.clone();
+                            move |window, cx| {
+                                Tooltip::new(name.clone()).build(window, cx)
+                            }
+                        })
+                        .on_click(cx.listener(move |launcher, _, window, cx| {
+                            launcher.switch_page(PageType::InstancePage { name: name.clone() }, &[PageType::Instances], window, cx);
+                        })));
+                }
+                groups.push(group.into_any_element());
+            }
+
+            v_flex()
+                .items_center().min_w_full().max_w_full().w_full()
+                .min_h_0()
+                .pt_1()
+                .px_2()
+                .gap_y_3()
+                .children(groups)
+                .overflow_y_scrollbar()
+                .into_any_element()
+        };
+
 
         let accounts = self.data.accounts.read(cx);
         let (account_head, account_name) = if let Some(account) = &accounts.selected_account {
@@ -533,7 +657,7 @@ impl Render for LauncherUI {
                     .text_color(cx.theme().sidebar_accent_foreground)
             })
             .child(account_head.size_8().min_w_8().min_h_8())
-            .child(ShrinkingText::new(account_name))
+            .when(!iconized_sidebar, |this| this.child(ShrinkingText::new(account_name)))
             .on_click({
                 let data = self.data.clone();
                 move |_, window, cx| {
@@ -637,8 +761,9 @@ impl Render for LauncherUI {
             .justify_center()
             .text_size(rems(0.9375))
             .child(Icon::new(PandoraIcon::Pandora).size_8().min_w_8().min_h_8())
-            .child(t::common::app_name());
+            .when(!iconized_sidebar, |this| this.child(t::common::app_name()));
         let footer_buttons = h_flex()
+            .when(iconized_sidebar, |this| this.flex_col())
             .child(settings_button)
             .child(bug_report_button)
             .when(!discord_invite.is_empty(), |this| this.child(discord_button));
@@ -650,13 +775,7 @@ impl Render for LauncherUI {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .child(header)
-            .child(v_flex()
-                .flex_1()
-                .min_h_0()
-                .px_3()
-                .gap_y_3()
-                .children(groups)
-                .overflow_y_scrollbar())
+            .child(sidebar_pages)
             .child(footer);
 
         ResizePanel::new(&self.sidebar_state, sidebar, self.page.clone().render(&self, window, cx))

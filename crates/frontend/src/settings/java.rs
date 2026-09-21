@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::{
-    Disableable, FocusableExt,
+    Disableable,
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     switch::Switch,
 };
