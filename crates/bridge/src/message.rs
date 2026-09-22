@@ -331,6 +331,10 @@ pub enum MessageToBackend {
         modal_action: ModalAction,
     },
     Quit,
+    MoveInstanceToGroup {
+        instance_id: InstanceID,
+        group: Arc<str>
+    },
 }
 
 #[derive(Debug)]

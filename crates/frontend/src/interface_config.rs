@@ -3,6 +3,7 @@ use std::{cmp::Ordering, io::Write, path::Path, sync::Arc, time::Duration};
 use bridge::instance::InstanceContentSummary;
 use gpui::{App, BorrowAppContext, SharedString, Task};
 use rand::RngCore;
+use rustc_hash::FxHashSet;
 use schema::{curseforge::CurseforgeClassId, modrinth::ModrinthProjectType, quickplay::QuickplayPreset};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,10 @@ pub struct InterfaceConfig {
     pub show_snapshots_in_create_instance: bool,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub instances_view_mode: InstancesViewMode,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_group_order: Vec<Arc<str>>,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub instance_groups_closed: FxHashSet<SharedString>,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub instance_subpage: InstanceSubpageType,
 
@@ -292,6 +297,8 @@ impl Default for InterfaceConfig {
             hide_skins: false,
             show_snapshots_in_create_instance: Default::default(),
             instances_view_mode: Default::default(),
+            instance_group_order: Vec::new(),
+            instance_groups_closed: Default::default(),
             instance_subpage: Default::default(),
             collapse_capes_in_skins_page: false,
             skin_list_sort_desc: false,

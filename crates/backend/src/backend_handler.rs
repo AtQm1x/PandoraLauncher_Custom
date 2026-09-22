@@ -1912,6 +1912,17 @@ impl BackendState {
             MessageToBackend::Quit => {
                 self.should_quit.store(true, Ordering::Relaxed);
             },
+            MessageToBackend::MoveInstanceToGroup { instance_id, group } => {
+                if let Some(instance) = self.instance_state.write().instances.get_mut(instance_id) {
+                    let group = if group.trim_ascii().is_empty() {
+                        None
+                    } else {
+                        Some(group)
+                    };
+                    instance.configuration.modify(|cfg| cfg.group = group);
+                    self.send.send(instance.create_modify_message());
+                }
+            }
         }
     }
 
