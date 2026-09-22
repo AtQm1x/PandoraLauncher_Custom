@@ -1032,7 +1032,7 @@ fn create_instance_content_summary(path: &Path, mod_metadata_manager: &Arc<ModMe
     filename_without_disabled.hash(&mut hasher);
     let filename_hash = hasher.finish();
 
-    let content_source = mod_metadata_manager.read_content_sources().get(&summary.hash).unwrap_or_default();
+    let content_source = mod_metadata_manager.read_content_sources().get(&summary.hash);
 
     let lowercase_search_keys = summary.id.as_ref().map(lowercase_arc).into_iter()
         .chain(summary.name.as_ref().map(lowercase_arc).into_iter())

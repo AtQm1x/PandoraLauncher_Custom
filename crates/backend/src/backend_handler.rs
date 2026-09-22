@@ -612,7 +612,7 @@ impl BackendState {
                 { // Scope is needed so await doesn't complain about the non-send RwLockReadGuard
                     let sources = self.mod_metadata_manager.read_content_sources();
                     for summary in content.iter() {
-                        let source = sources.get(&summary.content_summary.hash).unwrap_or(ContentSource::Manual);
+                        let source = sources.get(&summary.content_summary.hash);
                         let semaphore = &semaphore;
                         let meta = &meta;
                         let tracker = &tracker;
