@@ -300,7 +300,7 @@ impl BackendState {
                 if file_name == "instances" {
                     self.load_all_instances().await;
                 } else if file_name == "config.json" {
-                    self.config.write().mark_changed(&path);
+                    self.config.lock().mark_changed(&path);
                 } else if file_name == "accounts.json" {
                     let mut account_info = self.account_info.write();
                     account_info.mark_changed(&path);
@@ -322,8 +322,8 @@ impl BackendState {
                         return;
                     }
 
-                    let success = self.load_instance_from_path(path, false, true);
-                    if !success {
+                    let instance = self.load_instance_from_path(path, false, true);
+                    if instance.is_none() {
                         self.file_watching.write().watch_filesystem(path.clone(), WatchTarget::InvalidInstanceDir);
                     }
                 }

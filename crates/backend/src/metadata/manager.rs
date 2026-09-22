@@ -5,6 +5,7 @@ use std::{
 use bridge::notify_signal::{KeepAliveNotifySignal, KeepAliveNotifySignalHandle};
 use parking_lot::Mutex;
 use reqwest::StatusCode;
+use rustc_hash::FxHashMap;
 use schema::{
     assets_index::AssetsIndex,
     curseforge::{
@@ -24,11 +25,10 @@ use schema::{
 };
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
-use tokio::task::JoinHandle;
-
+use tokio::{sync::Semaphore, task::JoinHandle};
 use ustr::Ustr;
 
-use crate::metadata::items::{MetadataItem, ModrinthV3VersionUpdateMetadataItem, ModrinthVersionUpdateMetadataItem};
+use crate::{HttpClientProvider, metadata::items::{MetadataItem, ModrinthV3VersionUpdateMetadataItem, ModrinthVersionUpdateMetadataItem}};
 
 pub struct MetaState<T> {
     keep_alive: Option<KeepAliveNotifySignalHandle>,
@@ -42,6 +42,15 @@ impl <T> Default for MetaState<T> {
             keep_alive: None,
             load_state: MetaLoadState::Unloaded,
             failure_count: 0
+        }
+    }
+}
+
+impl <T> Drop for MetaState<T> {
+    fn drop(&mut self) {
+        match &self.load_state {
+            MetaLoadState::Pending(handle) => handle.abort(),
+            _ => {}
         }
     }
 }
@@ -121,9 +130,10 @@ pub struct MetadataManager {
     pub(super) forge_installer_maven_cache: Arc<Path>,
 
     expiring: enum_map::EnumMap<ExpirationDuration, Mutex<VecDeque<(Instant, KeepAliveNotifySignal)>>>,
+    per_host_semaphore: Mutex<FxHashMap<String, Arc<Semaphore>>>,
 
-    pub http_client: reqwest::Client,
-    pub config: Arc<parking_lot::RwLock<crate::persistent::Persistent<schema::backend_config::BackendConfig>>>,
+    pub http_client: HttpClientProvider,
+    pub config: Arc<Mutex<crate::persistent::Persistent<schema::backend_config::BackendConfig>>>,
 }
 
 #[derive(thiserror::Error, Clone, Debug)]
@@ -234,7 +244,7 @@ pub enum MetaLoadState<T> {
 }
 
 impl MetadataManager {
-    pub fn new(http_client: reqwest::Client, directory: Arc<Path>, config: Arc<parking_lot::RwLock<crate::persistent::Persistent<schema::backend_config::BackendConfig>>>) -> Self {
+    pub fn new(http_client: HttpClientProvider, directory: Arc<Path>, config: Arc<Mutex<crate::persistent::Persistent<schema::backend_config::BackendConfig>>>) -> Self {
         Self {
             states: Mutex::new(MetadataManagerStates::default()),
 
@@ -246,9 +256,17 @@ impl MetadataManager {
             metadata_cache: directory,
 
             expiring: Default::default(),
+            per_host_semaphore: Default::default(),
 
             http_client,
             config,
+        }
+    }
+
+    pub fn clear(&self) {
+        *self.states.lock() = MetadataManagerStates::default();
+        for expiring in self.expiring.values() {
+            expiring.lock().clear();
         }
     }
 
@@ -275,6 +293,17 @@ impl MetadataManager {
         handle
     }
 
+    fn get_semaphore(&self, host: &str) -> Arc<Semaphore> {
+        let mut per_host_semaphore = self.per_host_semaphore.lock();
+        if let Some(semaphore) = per_host_semaphore.get(host).cloned() {
+            return semaphore;
+        }
+
+        let semaphore = Arc::new(Semaphore::new(8));
+        per_host_semaphore.insert(host.to_string(), semaphore.clone());
+        semaphore
+    }
+
     pub fn preload<I: MetadataItem>(&self, item: I) {
         let wrapper = item.state(&mut *self.states.lock());
         let mut wrapper = wrapper.lock();
@@ -285,7 +314,8 @@ impl MetadataManager {
             }
 
             let cache_file = item.cache_file(self);
-            wrapper.load_state = Self::inner_start_loading(&item, cache_file, self);
+            let semaphore = self.get_semaphore(item.host());
+            wrapper.load_state = Self::inner_start_loading(&item, cache_file, semaphore, self);
         }
     }
 
@@ -324,7 +354,8 @@ impl MetadataManager {
 
                 if wrapper.should_reload(force_reload) {
                     let cache_file = item.cache_file(self);
-                    wrapper.load_state = Self::inner_start_loading(item, cache_file, self);
+                    let semaphore = self.get_semaphore(item.host());
+                    wrapper.load_state = Self::inner_start_loading(item, cache_file, semaphore, self);
                 }
                 force_reload = false;
 
@@ -404,6 +435,7 @@ impl MetadataManager {
     fn inner_start_loading<I: MetadataItem>(
         item: &I,
         cache_file: Option<impl AsRef<Path> + Send + Sync + 'static>,
+        semaphore: Arc<Semaphore>,
         manager: &MetadataManager,
     ) -> MetaLoadState<I::T> {
         log::debug!("Loading metadata {:?}", item);
@@ -460,7 +492,9 @@ impl MetadataManager {
             }
 
             let mut result: Result<Arc<I::T>, MetaLoadError> = async move {
+                let permit = semaphore.acquire().await;
                 let response = request.send().await?;
+                drop(permit);
 
                 let status = response.status();
                 if status != StatusCode::OK {

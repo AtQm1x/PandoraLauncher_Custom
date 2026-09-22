@@ -244,12 +244,14 @@ struct AtLauncherDisplayClaim {
 
 pub async fn import_from_atlauncher(backend: &BackendState, import_job: ImportFromOtherLauncherJob, modal_action: ModalAction) {
     let Ok(launcher_config_bytes) = std::fs::read(import_job.root.join("configs/ATLauncher.json")) else {
+        modal_action.set_finished_with_error("Unable to find configs/ATLauncher.json file".into());
         return;
     };
     let launcher_config = serde_json::from_slice::<AtLauncherConfig>(&launcher_config_bytes).expect("Failed to parse to json");
 
     let accounts = import_accounts_from_atlauncher(backend, &import_job, &launcher_config, &modal_action).await;
     import_instances_from_atlauncher(backend, &import_job, &launcher_config, &modal_action, &accounts);
+    modal_action.set_finished();
 }
 
 async fn import_accounts_from_atlauncher(backend: &BackendState, import_job: &ImportFromOtherLauncherJob, launcher_config: &AtLauncherConfig, modal_action: &ModalAction) -> Option<Vec<AtLauncherAccount>> {

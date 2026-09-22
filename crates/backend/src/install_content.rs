@@ -1,18 +1,18 @@
-use std::{ffi::{OsStr, OsString}, io::Write, path::{Path, PathBuf}, sync::Arc};
+use std::{ffi::{OsStr, OsString}, io::Write, path::Path, sync::Arc};
 
 use bridge::{
     install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentFolder, ContentSummary, ContentType, ModpackFileSource}, manual_download::ManualCurseforgeDownload, modal_action::{ModalAction, ProgressTrackerFinishType}, safe_path::SafePath
 };
 use parking_lot::Mutex;
 use reqwest::StatusCode;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashSet};
 use schema::{content::{ContentInstallReason, ContentSource}, curseforge::{CURSEFORGE_API_KEY, CURSEFORGE_RELATION_TYPE_REQUIRED_DEPENDENCY, CachedCurseforgeFileInfo, CurseforgeGetFilesRequest, CurseforgeGetModFilesRequest, CurseforgeModLoaderType}, loader::Loader, modrinth::{ModrinthDependencyType, ModrinthLoader, ModrinthProjectVersionsRequest}};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 use ustr::Ustr;
 
-use crate::{BackendState, instance::Instance, lockfile::Lockfile, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeGetModFilesMetadataItem, CurseforgeProjectItem, ModrinthProjectVersionsMetadataItem, ModrinthVersionMetadataItem}, manager::MetaLoadError}};
+use crate::{BackendState, instance::Instance, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeGetModFilesMetadataItem, CurseforgeProjectItem, ModrinthProjectVersionsMetadataItem, ModrinthVersionMetadataItem}, manager::MetaLoadError}};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContentInstallError {
@@ -50,11 +50,9 @@ pub enum ContentInstallError {
 
 struct InstallFromContentLibrary {
     filename: Arc<str>,
-    from: PathBuf,
+    from: Arc<Path>,
     replace: Option<Arc<Path>>,
-    hash: [u8; 20],
     install_path: Option<Arc<Path>>,
-    content_file: ContentInstallFile,
     mod_summary: Arc<ContentSummary>,
     dependencies: Vec<ContentInstallFile>,
 }
@@ -110,6 +108,7 @@ impl BackendState {
             }
             false
         });
+
         let installed_content_ids: Option<Mutex<InstalledContentIds>> = if needs_installed_content_ids {
             let mut installed_content_ids = InstalledContentIds::default();
 
@@ -184,16 +183,6 @@ impl BackendState {
             }
         }
 
-        let sources = files.iter()
-            .filter_map(|install| {
-                if install.content_file.content_source != ContentSource::Manual {
-                    Some((install.hash.clone(), install.content_file.content_source.clone()))
-                } else {
-                    None
-                }
-            });
-        self.mod_metadata_manager.set_content_sources(sources);
-
         let mut dot_minecraft_dir = None;
         let mut instance_running = false;
 
@@ -208,7 +197,7 @@ impl BackendState {
             let name = name.as_deref().unwrap_or("New Instance");
 
             // todo: use icon of mod/modpack/etc. for icon of instance
-            dot_minecraft_dir = self.create_instance_sanitized(&name, &minecraft_version, loader, None).await
+            dot_minecraft_dir = self.create_instance_sanitized(&name, &minecraft_version, loader, None)
                 .map(|v| v.join(".minecraft").into());
         }
 
@@ -328,7 +317,7 @@ impl BackendState {
                         None
                     };
 
-                    let mut result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(&ModrinthProjectVersionsRequest {
+                    let mut result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(ModrinthProjectVersionsRequest {
                         project_id: project_id.clone(),
                         game_versions: Some(Arc::new([content.minecraft_version.into()])),
                         loaders,
@@ -341,7 +330,7 @@ impl BackendState {
                     if not_found && modrinth_loader != ModrinthLoader::Unknown {
                         tracker.add_total(1);
 
-                        result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(&ModrinthProjectVersionsRequest {
+                        result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(ModrinthProjectVersionsRequest {
                             project_id: project_id.clone(),
                             game_versions: Some(Arc::new([content.minecraft_version.into()])),
                             loaders: None,
@@ -355,7 +344,7 @@ impl BackendState {
                     if not_found {
                         tracker.add_total(1);
 
-                        result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(&ModrinthProjectVersionsRequest {
+                        result = self.meta.fetch(ModrinthProjectVersionsMetadataItem(ModrinthProjectVersionsRequest {
                             project_id: project_id.clone(),
                             game_versions: None,
                             loaders: None,
@@ -408,8 +397,9 @@ impl BackendState {
                     return Err(ContentInstallError::InvalidHash(sha1.clone()));
                 };
 
-                let (path, hash, mod_summary) = self.download_file_into_library(&modal_action,
-                    (&safe_filename).into(), url, hash, size, download_meta).await?;
+                let source = ContentSource::ModrinthProject { project_id: project_id.clone() };
+                let (path, mod_summary) = self.download_file_into_library(&modal_action,
+                    (&safe_filename).into(), url, hash, size, Some(source), download_meta).await?;
 
                 if is_wrong_version && mod_summary.extra.is_strict_minecraft_version() {
                     return Err(ContentInstallError::UnableToFindVersion);
@@ -491,9 +481,7 @@ impl BackendState {
                     filename: install_file.filename.clone(),
                     from: path,
                     replace: content_file.replace_old.clone(),
-                    hash,
                     install_path,
-                    content_file: content_file.clone(),
                     mod_summary,
                     dependencies,
                 }
@@ -594,7 +582,7 @@ impl BackendState {
                     Some(url) => url.clone(),
                     None => {
                         let request_url = format!("https://api.curseforge.com/v1/mods/{}/files/{}/download-url", project_id, file.id);
-                        let api_key = self.config.write().get().curseforge_api_key.clone();
+                        let api_key = self.config.lock().get().curseforge_api_key.clone();
                         let client = reqwest::Client::new();
                         let result = client.get(&request_url)
                             .header("x-api-key", api_key.as_deref().unwrap_or(schema::curseforge::CURSEFORGE_API_KEY))
@@ -631,8 +619,9 @@ impl BackendState {
                     return Err(ContentInstallError::InvalidHash(sha1.clone()));
                 };
 
-                let (path, hash, mod_summary) = self.download_file_into_library(&modal_action,
-                    (&safe_filename).into(), &url, hash, size, download_meta).await?;
+                let source = ContentSource::CurseforgeProject { project_id };
+                let (path, mod_summary) = self.download_file_into_library(&modal_action,
+                    (&safe_filename).into(), &url, hash, size, Some(source), download_meta).await?;
 
                 if is_wrong_version && mod_summary.extra.is_strict_minecraft_version() {
                     return Err(ContentInstallError::UnableToFindVersion);
@@ -692,9 +681,7 @@ impl BackendState {
                     filename: file.file_name.clone(),
                     from: path,
                     replace: content_file.replace_old.clone(),
-                    hash,
                     install_path,
-                    content_file: content_file.clone(),
                     mod_summary,
                     dependencies,
                 }
@@ -718,8 +705,16 @@ impl BackendState {
 
                 let filename = name.filename.as_ref().map(|s| s.to_string_lossy()).unwrap_or_default().into();
 
-                let (path, hash, mod_summary) = self.download_file_into_library(&modal_action,
-                    name, url, *sha1, size, download_meta).await?;
+                let mut source = content_file.content_source.clone();
+                if source.can_be_replaced() {
+                    if let Some(automatic_source) = content_source_from_url(&*url) {
+                        if source.should_replace_with(&automatic_source) {
+                            source = automatic_source;
+                        }
+                    }
+                }
+                let (path, mod_summary) = self.download_file_into_library(&modal_action,
+                    name, url, *sha1, size, Some(source), download_meta).await?;
 
                 let install_path = match &content_file.path {
                     ContentInstallPath::Raw(path) => Some(path.clone()),
@@ -749,9 +744,7 @@ impl BackendState {
                     filename,
                     from: path,
                     replace: content_file.replace_old.clone(),
-                    hash,
                     install_path,
-                    content_file: content_file.clone(),
                     mod_summary,
                     dependencies: Default::default(),
                 }
@@ -786,6 +779,8 @@ impl BackendState {
                 if let Some(extension) = extension {
                     path.set_extension(extension);
                 }
+
+                let path: Arc<Path> = path.into();
 
                 let mod_summary = {
                     let path = path.clone();
@@ -839,9 +834,7 @@ impl BackendState {
                     filename: path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default().into(),
                     from: path,
                     replace: content_file.replace_old.clone(),
-                    hash: hash.into(),
                     install_path,
-                    content_file: content_file.clone(),
                     mod_summary,
                     dependencies: Default::default(),
                 }
@@ -908,21 +901,30 @@ impl BackendState {
         }
     }
 
-    async fn download_file_into_library(&self, modal_action: &ModalAction, name: FilenameAndExtension, url: &Arc<str>, sha1: [u8; 20], size: usize, download_meta: ModrinthDownloadMeta) -> Result<(PathBuf, [u8; 20], Arc<ContentSummary>), ContentInstallError> {
-        let mut result = self.download_file_into_library_inner(modal_action, name, url.clone(), sha1, size, download_meta.clone()).await?;
+    async fn download_file_into_library(
+        &self,
+        modal_action: &ModalAction,
+        name: FilenameAndExtension,
+        url: &Arc<str>,
+        sha1: [u8; 20],
+        size: usize,
+        source: Option<ContentSource>,
+        download_meta: ModrinthDownloadMeta
+    ) -> Result<(Arc<Path>, Arc<ContentSummary>), ContentInstallError> {
+        let mut result = self.download_file_into_library_inner(modal_action, name, url.clone(), sha1, size, source, download_meta.clone()).await?;
 
         let mut curseforge_file_ids = Vec::new();
 
-        let files = if let ContentType::ModrinthModpack { files, .. } = &result.2.extra {
+        let files = if let ContentType::ModrinthModpack { files, .. } = &result.1.extra {
             Some(files)
-        } else if let ContentType::CurseforgeModpack { unknown_files, files, .. } = &result.2.extra {
+        } else if let ContentType::CurseforgeModpack { unknown_files, files, .. } = &result.1.extra {
             for unknown_file in unknown_files.iter() {
                 curseforge_file_ids.push(unknown_file.file_id);
             }
 
             Some(files)
         } else {
-            None
+            return Ok(result);
         };
 
         let mut tasks = Vec::new();
@@ -931,6 +933,16 @@ impl BackendState {
         if let Some(files) = files {
             for file in files.iter() {
                 if let Some(summary) = &file.summary && summary.hash == file.hash {
+                    match &file.source {
+                        ModpackFileSource::DownloadUrl { url, .. } => {
+                            let source = content_source_from_url(&*url);
+                            if let Some(source) = source {
+                                self.mod_metadata_manager.set_content_source(file.hash, source);
+                            }
+                        },
+                        ModpackFileSource::DownloadCurseforge { .. } => {},
+                        ModpackFileSource::Builtin { .. } => {},
+                    }
                     continue;
                 }
 
@@ -946,7 +958,8 @@ impl BackendState {
                             game_version: download_meta.game_version,
                             loader: download_meta.loader,
                         };
-                        tasks.push(self.download_file_into_library_inner(modal_action, name, url.clone(), file.hash, *size, meta));
+                        let source = content_source_from_url(&*url);
+                        tasks.push(self.download_file_into_library_inner(modal_action, name, url.clone(), file.hash, *size, source, meta));
                     },
                     ModpackFileSource::DownloadCurseforge { file_id } => {
                         curseforge_file_ids.push(*file_id);
@@ -1002,8 +1015,9 @@ impl BackendState {
                         loader: download_meta.loader,
                     };
                     if let Some(download_url) = &file.download_url {
+                        let source = ContentSource::CurseforgeProject { project_id: file.mod_id };
                         tasks.push(self.download_file_into_library_inner(modal_action, name,
-                            download_url.clone(), hash, file.file_length as usize, meta));
+                            download_url.clone(), hash, file.file_length as usize, Some(source), meta));
                     } else {
                         manual_download_files.push((file.clone(), hash));
                         manual_download_tasks.push(self.meta.fetch(CurseforgeProjectItem { project_id: file.mod_id }));
@@ -1034,12 +1048,21 @@ impl BackendState {
             };
         }
 
-        result.2 = self.mod_metadata_manager.get_path(&result.0);
+        result.1 = self.mod_metadata_manager.get_path(&result.0);
 
         Ok(result)
     }
 
-    async fn download_file_into_library_inner(&self, modal_action: &ModalAction, name: FilenameAndExtension, url: Arc<str>, sha1: [u8; 20], size: usize, download_meta: ModrinthDownloadMeta) -> Result<(PathBuf, [u8; 20], Arc<ContentSummary>), ContentInstallError> {
+    async fn download_file_into_library_inner(
+        &self,
+        modal_action: &ModalAction,
+        name: FilenameAndExtension,
+        url: Arc<str>,
+        sha1: [u8; 20],
+        size: usize,
+        source: Option<ContentSource>,
+        download_meta: ModrinthDownloadMeta
+    ) -> Result<(Arc<Path>, Arc<ContentSummary>), ContentInstallError> {
         let hash_as_str = hex::encode(sha1);
 
         let hash_folder = self.directories.content_library_dir.join(&hash_as_str[..2]);
@@ -1050,11 +1073,17 @@ impl BackendState {
             path.set_extension(extension);
         }
 
+        let path: Arc<Path> = path.into();
+
         let _permit = self.content_install_semaphore.acquire().await.unwrap();
 
-        let lockfile = Lockfile::create(path.with_added_extension("lock").into()).await;
+        let _signal = crate::fs::lock_file(path.clone()).await;
 
         let file_name = name.filename.clone();
+
+        if let Some(source) = source {
+            self.mod_metadata_manager.set_content_source(sha1, source);
+        }
 
         let title = format!("Downloading {}", file_name.as_deref().map(|s| s.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed("???")));
         let tracker = modal_action.push_tracker(title.into());
@@ -1072,16 +1101,15 @@ impl BackendState {
             tracker.set_count(size);
             tracker.set_finished(ProgressTrackerFinishType::Normal);
             let summary = self.mod_metadata_manager.get_path(&path);
-            return Ok((path, sha1, summary));
+            return Ok((path, summary));
         }
 
-
-        let mut builder = self.redirecting_http_client.get(&*url)
+        let mut builder = self.http_client_provider.redirecting().get(&*url)
             .header("modrinth-download-meta", serde_json::to_string(&download_meta).unwrap_or_default());
 
         if let Ok(url) = url::Url::parse(&*url) {
             if let Some(host) = url.host_str() && host.ends_with("forgecdn.net") {
-                builder = builder.header("x-api-key", self.config.write().get().curseforge_api_key.as_deref().unwrap_or(CURSEFORGE_API_KEY));
+                builder = builder.header("x-api-key", self.config.lock().get().curseforge_api_key.as_deref().unwrap_or(CURSEFORGE_API_KEY));
             }
         }
 
@@ -1131,10 +1159,8 @@ impl BackendState {
             }
         }
 
-        drop(lockfile);
-
         let summary = self.mod_metadata_manager.get_path(&path);
-        Ok((path, sha1, summary))
+        Ok((path, summary))
     }
 }
 
@@ -1163,4 +1189,12 @@ fn url_to_filename(url: &str) -> Result<SafePath, ContentInstallError> {
     };
 
     Ok(filename)
+}
+
+fn content_source_from_url(url: &str) -> Option<ContentSource> {
+    if let Some(remainder) = url.strip_prefix("https://cdn.modrinth.com/data/") {
+        let (project_id, _) = remainder.split_once('/')?;
+        return Some(ContentSource::ModrinthProject { project_id: project_id.into() });
+    }
+    None
 }

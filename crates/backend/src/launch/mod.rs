@@ -28,6 +28,9 @@ use crate::{
     }}
 };
 
+mod defaults;
+pub use defaults::apply_global_launch_defaults;
+
 #[cfg(target_os = "linux")]
 mod linux_gpu;
 
@@ -2082,16 +2085,6 @@ impl LaunchContext {
     pub async fn launch(mut self, version_info: &MinecraftVersion, read_game_output: bool) -> std::io::Result<PandoraChild> {
         let mut wrapping_command: Vec<Cow<'static, OsStr>> = Vec::new();
 
-        #[cfg(target_os = "linux")]
-        if let Some(linux_wrapper) = &self.configuration.linux_wrapper {
-            if linux_wrapper.use_mangohud && let Some(mangohud) = command::get_command_path("mangohud") {
-                wrapping_command.push(mangohud.as_os_str().to_os_string().into());
-            }
-            if linux_wrapper.use_gamemode && let Some(gamemoderun) = command::get_command_path("gamemoderun") {
-                wrapping_command.push(gamemoderun.as_os_str().to_os_string().into());
-            }
-        }
-
         if let Some(InstanceWrapperCommandConfiguration { enabled: true, ref flags }) = self.configuration.wrapper_command {
             let split = match shell_words::split(&flags) {
               Ok(split) => split,
@@ -2099,6 +2092,16 @@ impl LaunchContext {
             };
             for arg in split {
                 wrapping_command.push(Cow::Owned(OsString::from(arg)));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(linux_wrapper) = &self.configuration.linux_wrapper {
+            if linux_wrapper.use_mangohud && let Some(mangohud) = command::get_command_path("mangohud") {
+                wrapping_command.push(mangohud.as_os_str().to_os_string().into());
+            }
+            if linux_wrapper.use_gamemode && let Some(gamemoderun) = command::get_command_path("gamemoderun") {
+                wrapping_command.push(gamemoderun.as_os_str().to_os_string().into());
             }
         }
 
@@ -2333,6 +2336,15 @@ impl LaunchContext {
             ];
 
             allow_read.push(java_path_parent_parent.into());
+
+            // Some java installations will contain symlinks to external folders (e.g. arch symlinks conf, legal and man)
+            for folder in ["bin", "conf", "demo", "include", "jmods", "legal", "lib", "man"] {
+                if let Ok(real_dir) =  java_path_parent_parent.join(folder).canonicalize()
+                    && !real_dir.starts_with(java_path_parent_parent)
+                {
+                    allow_read.push(real_dir.into());
+                }
+            }
 
             command.spawn_sandboxed(PandoraSandbox {
                 allow_read,

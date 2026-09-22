@@ -1,12 +1,12 @@
 use bridge::handle::BackendHandle;
 use gpui::{prelude::*, *};
 use gpui_component::{
-    IndexPath, button::{Button, ButtonVariants}, h_flex, select::{Select, SelectDelegate, SelectEvent, SelectItem, SelectState}, table::{DataTable, TableDelegate, TableState}
+    IndexPath, button::{Button, ButtonVariants}, h_flex, select::{Select, SelectDelegate, SelectEvent, SelectItem, SelectState}, table::{DataTable, TableState}
 };
 use strum::IntoEnumIterator;
 
 use crate::{
-    component::{instance_list::InstanceList, named_dropdown::{NamedDropdown, NamedDropdownItem}, responsive_grid::ResponsiveGrid}, entity::{DataEntities, instance::InstanceEntries, metadata::FrontendMetadata}, icon::PandoraIcon, interface_config::{InstancesViewMode, InterfaceConfig}, pages::page::Page,
+    component::{instance_list::InstanceList, named_dropdown::{NamedDropdown, NamedDropdownItem}}, entity::{DataEntities, instance::InstanceEntries, metadata::FrontendMetadata}, icon::PandoraIcon, interface_config::{InstancesViewMode, InterfaceConfig}, pages::page::Page,
 };
 
 pub struct InstancesPage {
@@ -78,16 +78,9 @@ impl Render for InstancesPage {
         match InterfaceConfig::get(cx).instances_view_mode {
             InstancesViewMode::Cards => {
                 let cards = self.instance_table.update(cx, |table, cx| {
-                    let rows = table.delegate().rows_count(cx);
-                    (0..rows).map(|i| table.delegate().render_card(i, cx)).collect::<Vec<_>>()
+                    table.delegate().render_cards(cx)
                 });
-
-                let size = Size::new(
-                    gpui::AvailableSpace::MinContent,
-                    gpui::AvailableSpace::MinContent
-                );
-
-                div().p_4().child(ResponsiveGrid::new(size).size_full().gap_4().children(cards)).into_any_element()
+                div().size_full().p_4().child(cards).into_any_element()
             },
             InstancesViewMode::List => {
                 DataTable::new(&self.instance_table).bordered(false).into_any_element()

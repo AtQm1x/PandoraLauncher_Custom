@@ -2,10 +2,10 @@ use std::{borrow::Cow, io::{BufRead, Read}, sync::{Arc, atomic::Ordering}, time:
 
 use auth::{credentials::AccountCredentials, models::MinecraftAccessToken, secret::PlatformSecretStorage};
 use bridge::{
-    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentFolder, ContentSummary, ContentType, InstanceID}, keep_alive::KeepAlive, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, EmbeddedOrRaw, GameOutputMsg, LogFiles, MessageToBackend, MessageToFrontend, QuickPlayLaunch}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTrackerFinishType}, serial::AtomicOptionSerial
+    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentFolder, ContentSummary, ContentType, InstanceID}, keep_alive::KeepAlive, message::{AccountCapesResult, AccountSkinResult, EmbeddedOrRaw, GameOutputMsg, LogFiles, MessageToBackend, MessageToFrontend, QuickPlayLaunch}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTrackerFinishType}, serial::AtomicOptionSerial
 };
 use futures::TryFutureExt;
-use schema::{auxiliary::AuxiliaryContentMeta, content::{ContentInstallReason, ContentSource}, curseforge::CurseforgeGetModFilesRequest, loader::Loader, minecraft_profile::{MinecraftProfileResponse, SkinVariant}, modrinth::ModrinthLoader, version::{LaunchArgument, LaunchArgumentValue}};
+use schema::{auxiliary::AuxiliaryContentMeta, content::{ContentInstallReason, ContentSource}, curseforge::CurseforgeGetModFilesRequest, loader::Loader, minecraft_profile::{MinecraftProfileResponse, SkinVariant}, modrinth::ModrinthLoader, quickplay::QuickplayPreset, version::{LaunchArgument, LaunchArgumentValue}};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use tokio::{io::AsyncBufReadExt, sync::{Semaphore, TryAcquireError}};
@@ -45,7 +45,7 @@ impl BackendState {
                             (result.map(MetadataResult::ModrinthSearchResult), handle)
                         },
                         bridge::meta::MetadataRequest::ModrinthProjectVersions(ref project_versions) => {
-                            let (result, handle) = meta.fetch_with_keepalive(ModrinthProjectVersionsMetadataItem(project_versions), force_reload).await;
+                            let (result, handle) = meta.fetch_with_keepalive(ModrinthProjectVersionsMetadataItem(project_versions.clone()), force_reload).await;
                             (result.map(MetadataResult::ModrinthProjectVersionsResult), handle)
                         },
                         bridge::meta::MetadataRequest::ModrinthProject(ref project) => {
@@ -90,7 +90,7 @@ impl BackendState {
                 tokio::task::spawn(Instance::load_content(self.clone(), id, content_folder));
             },
             MessageToBackend::CreateInstance { name, version, loader, icon } => {
-                self.create_instance(&name, &version, loader, icon).await;
+                self.create_instance(&name, &version, loader, icon);
             },
             MessageToBackend::DeleteInstance { id } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
@@ -334,6 +334,18 @@ impl BackendState {
                 live_game_output,
                 modal_action,
             } => {
+                self.start_instance(id, quick_play, live_game_output, modal_action).await
+            },
+            MessageToBackend::StartQuickplayInstance {
+                preset,
+                minecraft_version,
+                quick_play,
+                live_game_output,
+                modal_action
+            } => {
+                let Some(id) = self.setup_quickplay_instance(preset, minecraft_version, &modal_action).await else {
+                    return;
+                };
                 self.start_instance(id, quick_play, live_game_output, modal_action).await
             },
             MessageToBackend::SetContentEnabled { id, content_ids: mod_ids, enabled } => {
@@ -607,7 +619,7 @@ impl BackendState {
                 { // Scope is needed so await doesn't complain about the non-send RwLockReadGuard
                     let sources = self.mod_metadata_manager.read_content_sources();
                     for summary in content.iter() {
-                        let source = sources.get(&summary.content_summary.hash).unwrap_or(ContentSource::Manual);
+                        let source = sources.get(&summary.content_summary.hash);
                         let semaphore = &semaphore;
                         let meta = &meta;
                         let tracker = &tracker;
@@ -1133,7 +1145,7 @@ impl BackendState {
                 _ = channel.send(result);
             },
             MessageToBackend::GetSyncState { channel } => {
-                let result = crate::syncing::get_sync_state(&self.config.write().get().sync_targets, &mut *self.instance_state.write(), &self.directories);
+                let result = crate::syncing::get_sync_state(&self.config.lock().get().sync_targets, &mut *self.instance_state.write(), &self.directories);
 
                 match result {
                     Ok(state) => {
@@ -1145,7 +1157,7 @@ impl BackendState {
                 }
             },
             MessageToBackend::SetSyncing { target, is_file, value } => {
-                let mut write = self.config.write();
+                let mut write = self.config.lock();
 
                 let result = if value {
                     crate::syncing::enable_all(&target, is_file, &mut *self.instance_state.write(), &self.directories)
@@ -1182,28 +1194,13 @@ impl BackendState {
                 });
             },
             MessageToBackend::GetBackendConfiguration { channel } => {
-                let configuration = self.config.write().get().clone();
-                let proxy_password = if configuration.proxy.enabled && configuration.proxy.auth_enabled {
-                    match PlatformSecretStorage::new().await {
-                        Ok(storage) => match storage.read_proxy_password().await {
-                            Ok(password) => password,
-                            Err(e) => {
-                                log::warn!("Failed to read proxy password from keyring: {:?}", e);
-                                None
-                            }
-                        },
-                        Err(e) => {
-                            log::warn!("Failed to create secret storage: {:?}", e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                _ = channel.send(BackendConfigWithPassword {
-                    config: configuration,
-                    proxy_password,
+                _ = channel.send(self.config.lock().get().clone());
+            },
+            MessageToBackend::SetLaunchDefaults { memory, jvm_flags, jvm_binary } => {
+                self.config.lock().modify(|backend_config| {
+                    backend_config.memory = memory;
+                    backend_config.jvm_flags = jvm_flags;
+                    backend_config.jvm_binary = jvm_binary;
                 });
             },
             MessageToBackend::CleanupOldLogFiles { instance: id } => {
@@ -1293,7 +1290,7 @@ impl BackendState {
                     return;
                 }
 
-                let result = self.http_client.post("https://api.mclo.gs/1/log").form(&[("content", &*replaced)]).send().await;
+                let result = self.http_client_provider.client().post("https://api.mclo.gs/1/log").form(&[("content", &*replaced)]).send().await;
 
                 let resp = match result {
                     Ok(resp) => resp,
@@ -1410,44 +1407,45 @@ impl BackendState {
                     account_info.accounts.move_index(from_index, to_index);
                 });
             },
-
             MessageToBackend::SetAuthlibInjectorUrl { url } => {
-                self.config.write().modify(|config| {
+                self.config.lock().modify(|config| {
                     config.authlib_injector_url = url;
                 });
             },
             MessageToBackend::SetCurseforgeApiKey { key } => {
-                self.config.write().modify(|config| {
+                self.config.lock().modify(|config| {
                     config.curseforge_api_key = key;
                 });
             },
-            MessageToBackend::SetProxyConfiguration { config, password } => {
-                self.config.write().modify(|backend_config| {
+            MessageToBackend::SetProxyConfiguration { config } => {
+                self.config.lock().modify(|backend_config| {
                     backend_config.proxy = config;
                 });
 
-                // system keyring (store or delete)
-                if let Some(password) = password {
-                    match self.secret_storage.get_or_init(PlatformSecretStorage::new).await {
-                        Ok(storage) => {
-                            if password.is_empty() {
-                                if let Err(e) = storage.delete_proxy_password().await {
-                                    log::warn!("Failed to delete proxy password from keyring: {:?}", e);
-                                }
-                            } else if let Err(e) = storage.write_proxy_password(&password).await {
-                                log::warn!("Failed to write proxy password to keyring: {:?}", e);
-                                self.send.send_error("Failed to save proxy password to system keyring");
+                self.update_http_clients().await;
+            },
+            MessageToBackend::SetProxyPassword { password } => {
+                match self.secret_storage.get_or_init(PlatformSecretStorage::new).await {
+                    Ok(storage) => {
+                        if password.is_empty() {
+                            if let Err(e) = storage.delete_proxy_password().await {
+                                log::warn!("Failed to delete proxy password from keyring: {:?}", e);
+                                return;
                             }
-                        },
-                        Err(e) => {
-                            log::warn!("Failed to initialize secret storage: {:?}", e);
-                            self.send.send_error("Failed to access system keyring for proxy password");
+                        } else if let Err(e) = storage.write_proxy_password(&password).await {
+                            log::warn!("Failed to write proxy password to keyring: {:?}", e);
+                            self.send.send_error("Failed to save proxy password to system keyring");
+                            return;
                         }
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to initialize secret storage: {:?}", e);
+                        self.send.send_error("Failed to access system keyring for proxy password");
+                        return;
                     }
                 }
 
-                // Notify user that restart is required for proxy changes to take effect
-                self.send.send_info("Proxy settings saved. Restart the launcher to apply changes.");
+                self.update_http_clients().await;
             },
             MessageToBackend::CreateInstanceShortcut { id, path } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
@@ -1567,7 +1565,7 @@ impl BackendState {
                 }
             },
             MessageToBackend::InstallUpdate { update, modal_action } => {
-                tokio::task::spawn(crate::update::install_update(self.redirecting_http_client.clone(), self.directories.clone(), self.send.clone(), update, modal_action));
+                tokio::task::spawn(crate::update::install_update(self.http_client_provider.redirecting(), self.directories.clone(), self.send.clone(), update, modal_action));
             },
             MessageToBackend::ImportFromOtherLauncher { launcher, import_job, modal_action } => {
                 crate::launcher_import::import_from_other_launcher(self, launcher, import_job, modal_action).await;
@@ -1587,7 +1585,7 @@ impl BackendState {
                         if let Some(url) = authlib_url {
                             let session_url = format!("{}/sessionserver/session/minecraft/profile/{}", url, account.simple());
                             let mut skin_url = None;
-                            if let Ok(response) = backend.http_client.get(&session_url).send().await {
+                            if let Ok(response) = backend.http_client_provider.client().get(&session_url).send().await {
                                 if let Ok(body) = response.text().await {
                                     skin_url = BackendState::extract_skin_url_from_profile(&body);
                                 }
@@ -1618,7 +1616,7 @@ impl BackendState {
                         .file_name("file.png")
                         .mime_str("image/png").unwrap());
 
-                let response = self.http_client
+                let response = self.http_client_provider.client()
                     .post("https://api.minecraftservices.com/minecraft/profile/skins")
                     .multipart(form)
                     .bearer_auth(access_token.secret())
@@ -1679,11 +1677,11 @@ impl BackendState {
                         cape_id: Uuid
                     }
 
-                    self.http_client.put("https://api.minecraftservices.com/minecraft/profile/capes/active").json(&PutActiveCape {
+                    self.http_client_provider.client().put("https://api.minecraftservices.com/minecraft/profile/capes/active").json(&PutActiveCape {
                         cape_id: cape
                     })
                 } else {
-                    self.http_client.delete("https://api.minecraftservices.com/minecraft/profile/capes/active")
+                    self.http_client_provider.client().delete("https://api.minecraftservices.com/minecraft/profile/capes/active")
                 };
 
                 let response = request
@@ -1742,7 +1740,7 @@ impl BackendState {
                             .unwrap_or("skin.png")
                             .to_owned();
 
-                        let response = self.redirecting_http_client.get(url).send().await;
+                        let response = self.http_client_provider.redirecting().get(url).send().await;
 
                         let response = match response {
                             Ok(response) => response,
@@ -1815,7 +1813,7 @@ impl BackendState {
                     "https://api.mojang.com/minecraft/profile/lookup/name/{}",
                     username
                 );
-                let response = match self.http_client.get(&lookup_url).send().await {
+                let response = match self.http_client_provider.client().get(&lookup_url).send().await {
                     Ok(r) => r,
                     Err(err) => {
                         log::error!("CopyPlayerSkin: failed to request Mojang API: {:?}", err);
@@ -1861,7 +1859,7 @@ impl BackendState {
                     "https://sessionserver.mojang.com/session/minecraft/profile/{}",
                     uuid
                 );
-                let response = match self.http_client.get(&session_url).send().await {
+                let response = match self.http_client_provider.client().get(&session_url).send().await {
                     Ok(r) => r,
                     Err(err) => {
                         log::error!("CopyPlayerSkin: failed to request session server: {:?}", err);
@@ -1902,7 +1900,7 @@ impl BackendState {
 
                 let filename = format!("{}.png", username);
 
-                let response = match self.redirecting_http_client.get(url).send().await {
+                let response = match self.http_client_provider.redirecting().get(url).send().await {
                     Ok(r) => r,
                     Err(err) => {
                         log::error!("CopyPlayerSkin: failed to request skin texture: {:?}", err);
@@ -1952,6 +1950,17 @@ impl BackendState {
             MessageToBackend::Quit => {
                 self.should_quit.store(true, Ordering::Relaxed);
             },
+            MessageToBackend::MoveInstanceToGroup { instance_id, group } => {
+                if let Some(instance) = self.instance_state.write().instances.get_mut(instance_id) {
+                    let group = if group.trim_ascii().is_empty() {
+                        None
+                    } else {
+                        Some(group)
+                    };
+                    instance.configuration.modify(|cfg| cfg.group = group);
+                    self.send.send(instance.create_modify_message());
+                }
+            }
         }
     }
 
@@ -1964,7 +1973,7 @@ impl BackendState {
     ) {
         let keepalive = KeepAlive::new();
 
-        let (dot_minecraft, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+        let (dot_minecraft, mut configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
             if let Some(launch_keepalive) = &instance.launch_keepalive && launch_keepalive.is_alive() {
                 modal_action.set_finished_with_error("Can't launch instance, already launching".into());
                 return;
@@ -1983,6 +1992,8 @@ impl BackendState {
             modal_action.set_finished_with_error("Can't launch instance, unknown id".into());
             return;
         };
+
+        crate::launch::apply_global_launch_defaults(&mut configuration, self.config.lock().get());
 
         scopeguard::defer! {
             modal_action.set_finished();
@@ -2020,7 +2031,7 @@ impl BackendState {
 
         let launch_tracker = modal_action.push_tracker("Launching".into());
         let authlib_injector_url = self.account_info.write().get().accounts.get(&login_info.uuid).and_then(|a| a.authlib_injector_url.clone());
-        let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, authlib_injector_url, live_game_output.is_some(), &launch_tracker, &modal_action).await;
+        let result = self.launcher.launch(&self.http_client_provider.redirecting(), dot_minecraft, configuration, quick_play, login_info, authlib_injector_url, live_game_output.is_some(), &launch_tracker, &modal_action).await;
 
         if matches!(result, Err(LaunchError::CancelledByUser)) {
             return;
@@ -2054,6 +2065,75 @@ impl BackendState {
         }
 
         launch_tracker.set_finished(ProgressTrackerFinishType::from_err(is_err));
+    }
+
+    async fn setup_quickplay_instance(self: &Arc<Self>, preset: QuickplayPreset, minecraft_version: Ustr, modal_action: &ModalAction) -> Option<InstanceID> {
+        let loader = crate::quickplay_presets::loader(preset);
+
+        let name = schema::quickplay::INSTANCE_NAME;
+        let (id, mods_folder) = if let Some(existing) = self.instance_state.write().instances.iter_mut().find(|i| i.name == name) {
+            existing.configuration.modify(|cfg| {
+                cfg.minecraft_version = minecraft_version;
+                cfg.loader = loader;
+                cfg.sandbox = true;
+            });
+            let mods_folder = if existing.frozen_mods_folder {
+                None
+            } else {
+                Some(existing.content_state[ContentFolder::Mods].path.clone())
+            };
+            (existing.id, mods_folder)
+        } else {
+            let tracker = modal_action.push_tracker("Creating instance".into());
+            tracker.add_total(2);
+
+            let path = self.create_instance(name, minecraft_version.as_str(), loader, None)?;
+
+            tracker.add_count(1);
+
+            let instance_id = self.load_instance_from_path(&path, true, false)?;
+
+            let mods_folder = if let Some(instance) = self.instance_state.write().instances.get_mut(instance_id) {
+                instance.configuration.modify(|cfg| {
+                    cfg.minecraft_version = minecraft_version;
+                    cfg.loader = loader;
+                    cfg.sandbox = true;
+                });
+                if instance.frozen_mods_folder {
+                    None
+                } else {
+                    Some(instance.content_state[ContentFolder::Mods].path.clone())
+                }
+            } else {
+                None
+            };
+
+            tracker.add_count(1);
+            tracker.set_finished(ProgressTrackerFinishType::Normal);
+
+            (instance_id, mods_folder)
+        };
+
+        if loader == Loader::Vanilla {
+            return Some(id);
+        }
+        let Some(mods_folder) = mods_folder else {
+            return Some(id);
+        };
+
+        let files = crate::quickplay_presets::resolve_installs(preset, minecraft_version, self.meta.clone(), modal_action).await;
+
+        _ = std::fs::remove_dir_all(mods_folder);
+        let install = ContentInstall {
+            target: InstallTarget::Instance(id),
+            loader,
+            minecraft_version,
+            files,
+        };
+
+        self.install_content(install, modal_action.clone()).await;
+
+        Some(id)
     }
 
     pub fn extract_skin_url_from_profile(profile_json: &str) -> Option<Arc<str>> {
@@ -2216,7 +2296,7 @@ impl BackendState {
                             let mut skin_url = None;
                             let mut properties = None;
                             let session_url = format!("{}/sessionserver/session/minecraft/profile/{}", url, uuid.simple());
-                            if let Ok(response) = self.http_client.get(&session_url).send().await {
+                            if let Ok(response) = self.http_client_provider.client().get(&session_url).send().await {
                                 if let Ok(body) = response.text().await {
                                     skin_url = BackendState::extract_skin_url_from_profile(&body);
                                     properties = BackendState::extract_properties_from_profile(&body);
@@ -2456,7 +2536,7 @@ impl BackendState {
 
                 let mut skin_url = None;
                 let session_url = format!("{}/sessionserver/session/minecraft/profile/{}", server_url.trim().trim_end_matches('/'), uuid.simple());
-                if let Ok(response) = self.http_client.get(&session_url).send().await {
+                if let Ok(response) = self.http_client_provider.client().get(&session_url).send().await {
                     if let Ok(body) = response.text().await {
                         skin_url = BackendState::extract_skin_url_from_profile(&body);
                     }

@@ -197,7 +197,7 @@ impl Render for ImportPage {
             if let Some(import_job) = &self.import_job {
                 import_box = import_box.child(h_flex()
                     .gap_2()
-                    .text_color(cx.theme().success_foreground)
+                    .text_color(cx.theme().button_success_foreground)
                     .child(PandoraIcon::Check)
                     .child(t::import::detected_files())
                 );
@@ -231,7 +231,7 @@ impl Render for ImportPage {
                                         .child(h_flex()
                                             .gap_2()
                                             .line_height(rems(1.0))
-                                            .text_color(cx.theme().warning_foreground)
+                                            .text_color(cx.theme().button_warning_foreground)
                                             .child(PandoraIcon::TriangleAlert)
                                             .child(t::import::already_exists())
                                         ).into_any_element()
@@ -292,7 +292,7 @@ impl Render for ImportPage {
             } else if self._get_import_job_task.is_ready() {
                 import_box = import_box.child(h_flex()
                     .gap_2()
-                    .text_color(cx.theme().danger_foreground)
+                    .text_color(cx.theme().button_danger_foreground)
                     .child(PandoraIcon::TriangleAlert)
                     .child(t::import::no_detected_files())
                 );

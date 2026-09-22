@@ -14,7 +14,7 @@ use bridge::{
 };
 use image::ImageFormat;
 use indexmap::IndexSet;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use reqwest::{StatusCode, redirect::Policy};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use schema::{auxiliary::AuxiliaryContentMeta, backend_config::{BackendConfig, ProxyConfig, SyncTargets}, content::{ContentInstallReason, ContentSource}, curseforge::{CachedCurseforgeFileInfo, CurseforgeGetFilesRequest}, instance::InstanceConfiguration, loader::Loader, minecraft_profile::MinecraftProfileResponse};
@@ -27,51 +27,103 @@ use crate::{
     account::{BackendAccountInfo, MinecraftLoginInfo}, curseforge_manual_download::ManualCurseforgeDownloadSession, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::{CurseforgeGetFilesMetadataItem, CurseforgeProjectItem, FabricLoaderManifestMetadataItem, ForgeInstallerMavenMetadataItem, MinecraftVersionManifestMetadataItem, NeoforgeInstallerMavenMetadataItem}, manager::MetadataManager}, mod_metadata::ModMetadataManager, persistent::Persistent, server_list_pinger::ServerListPinger, skin_manager::SkinManager
 };
 
-fn build_http_clients(user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) -> (reqwest::Client, reqwest::Client) {
-    let proxy_url = proxy_config.to_url(proxy_password);
+#[derive(Clone)]
+pub struct HttpClientProvider {
+    client: Arc<RwLock<reqwest::Client>>,
+    redirecting: Arc<RwLock<reqwest::Client>>
+}
 
-    let mut http_builder = reqwest::ClientBuilder::new()
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(15))
-        .redirect(Policy::none())
-        .use_rustls_tls()
-        .user_agent(user_agent);
+impl HttpClientProvider {
+    pub fn create(user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) -> Self {
+        let (client, redirecting) = Self::build(user_agent, proxy_config, proxy_password);
 
-    let mut redirecting_builder = reqwest::ClientBuilder::new()
-        .use_rustls_tls()
-        .user_agent(user_agent);
-
-    if let Some(proxy_url) = &proxy_url {
-        if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
-            let proxy = proxy.no_proxy(reqwest::NoProxy::from_env());
-            http_builder = http_builder.proxy(proxy.clone());
-            redirecting_builder = redirecting_builder.proxy(proxy);
-            log::info!("Proxy configured: {}://{}:{}", proxy_config.protocol.scheme(), proxy_config.host, proxy_config.port);
-        } else {
-            log::warn!("Failed to parse proxy URL, proceeding without proxy");
+        Self {
+            client: Arc::new(RwLock::new(client)),
+            redirecting: Arc::new(RwLock::new(redirecting)),
         }
     }
 
-    let http_client = http_builder.build().expect("Failed to build HTTP client");
-    let redirecting_http_client = redirecting_builder.build().expect("Failed to build redirecting HTTP client");
+    pub fn update(&self, user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) {
+        let (client, redirecting) = Self::build(user_agent, proxy_config, proxy_password);
 
-    (http_client, redirecting_http_client)
+        *self.client.write() = client;
+        *self.redirecting.write() = redirecting;
+    }
+
+    pub fn build(user_agent: &str, proxy_config: &ProxyConfig, proxy_password: Option<&str>) -> (reqwest::Client, reqwest::Client) {
+        let proxy_url = proxy_config.to_url(proxy_password);
+
+        let base = || {
+            reqwest::ClientBuilder::new()
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(15))
+                .use_rustls_tls()
+                .user_agent(user_agent)
+        };
+
+        const MAX_REDIRECT_COUNT: usize = 5;
+
+        let mut redirecting_builder = (base)().redirect(Policy::limited(MAX_REDIRECT_COUNT));
+        let mut http_builder = (base)().redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_REDIRECT_COUNT {
+                return attempt.error("Too many redirects");
+            }
+
+            if let Some(last) = attempt.previous().last() {
+                let from = attempt.url().host_str().unwrap_or(attempt.url().as_str());
+                let to = last.host_str().unwrap_or(last.as_str());
+                if from != to {
+                    let error_message = format!("Cross-origin redirect not allowed ({} to {})", from, to);
+                    return attempt.error(error_message);
+                }
+            }
+
+            attempt.follow()
+        }));
+
+        if let Some(proxy_url) = &proxy_url {
+            if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
+                let proxy = proxy.no_proxy(reqwest::NoProxy::from_env());
+                http_builder = http_builder.proxy(proxy.clone());
+                redirecting_builder = redirecting_builder.proxy(proxy);
+                log::info!("Proxy configured: {}://{}:{}", proxy_config.protocol.scheme(), proxy_config.host, proxy_config.port);
+            } else {
+                log::warn!("Failed to parse proxy URL, proceeding without proxy");
+            }
+        }
+
+        let http_client = http_builder.build().expect("Failed to build HTTP client");
+        let redirecting_http_client = redirecting_builder.build().expect("Failed to build redirecting HTTP client");
+
+        (http_client, redirecting_http_client)
+    }
+
+    pub fn client(&self) -> reqwest::Client {
+        self.client.read().clone()
+    }
+
+    pub fn redirecting(&self) -> reqwest::Client {
+        self.redirecting.read().clone()
+    }
+
+    pub fn get<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder {
+        self.client.read().get(url)
+    }
+
+    pub fn post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder {
+        self.client.read().post(url)
+    }
 }
 
 pub fn start(runtime: tokio::runtime::Runtime, launcher_dir: PathBuf, send: FrontendHandle, self_handle: BackendHandle, recv: BackendReceiver, quit_handler: QuitCoordinator) {
-    let user_agent = if let Some(version) = option_env!("PANDORA_RELEASE_VERSION") {
-        format!("PandoraLauncher/{version} (https://github.com/Moulberry/PandoraLauncher)")
-    } else {
-        "PandoraLauncher/dev (https://github.com/Moulberry/PandoraLauncher)".to_string()
-    };
-
     let directories = Arc::new(LauncherDirectories::new(launcher_dir));
+    let secret_storage = Arc::new(OnceCell::new());
 
-    let config: Arc<RwLock<Persistent<BackendConfig>>> = Arc::new(RwLock::new(Persistent::load(directories.config_json.clone())));
-    let proxy_config = config.write().get().proxy.clone();
+    let config = Arc::new(Mutex::new(Persistent::<BackendConfig>::load(directories.config_json.clone())));
+    let proxy_config = config.lock().get().proxy.clone();
     let proxy_password: Option<String> = if proxy_config.enabled && proxy_config.auth_enabled {
         runtime.block_on(async {
-            match PlatformSecretStorage::new().await {
+            match secret_storage.get_or_init(PlatformSecretStorage::new).await {
                 Ok(storage) => match storage.read_proxy_password().await {
                     Ok(password) => password,
                     Err(e) => {
@@ -89,10 +141,10 @@ pub fn start(runtime: tokio::runtime::Runtime, launcher_dir: PathBuf, send: Fron
         None
     };
 
-    let (http_client, redirecting_http_client) = build_http_clients(&user_agent, &proxy_config, proxy_password.as_deref());
+    let http_client_provider = HttpClientProvider::create(&*schema::USER_AGENT, &proxy_config, proxy_password.as_deref());
 
     let meta = Arc::new(MetadataManager::new(
-        http_client.clone(),
+        http_client_provider.clone(),
         directories.metadata_dir.clone(),
         config.clone(),
     ));
@@ -127,8 +179,7 @@ pub fn start(runtime: tokio::runtime::Runtime, launcher_dir: PathBuf, send: Fron
     let state = BackendState {
         self_handle,
         send: send.clone(),
-        http_client,
-        redirecting_http_client,
+        http_client_provider,
         meta: Arc::clone(&meta),
         instance_state: Arc::new(RwLock::new(state_instances)),
         file_watching: Arc::new(RwLock::new(state_file_watching)),
@@ -136,8 +187,8 @@ pub fn start(runtime: tokio::runtime::Runtime, launcher_dir: PathBuf, send: Fron
         launcher: Launcher::new(meta, directories, send),
         mod_metadata_manager: Arc::new(mod_metadata_manager),
         account_info: Arc::new(RwLock::new(account_info)),
-        config: Arc::clone(&config),
-        secret_storage: Arc::new(OnceCell::new()),
+        config,
+        secret_storage,
         login_semaphore: Arc::new(Semaphore::new(1)),
         cached_minecraft_profiles: Default::default(),
         skin_manager: Default::default(),
@@ -190,8 +241,7 @@ pub struct BackendStateFileWatching {
 pub struct BackendState {
     pub self_handle: BackendHandle,
     pub send: FrontendHandle,
-    pub http_client: reqwest::Client,
-    pub redirecting_http_client: reqwest::Client,
+    pub http_client_provider: HttpClientProvider,
     pub meta: Arc<MetadataManager>,
     pub instance_state: Arc<RwLock<BackendStateInstances>>,
     pub file_watching: Arc<RwLock<BackendStateFileWatching>>,
@@ -199,7 +249,7 @@ pub struct BackendState {
     pub launcher: Launcher,
     pub mod_metadata_manager: Arc<ModMetadataManager>,
     pub account_info: Arc<RwLock<Persistent<BackendAccountInfo>>>,
-    pub config: Arc<RwLock<Persistent<BackendConfig>>>,
+    pub config: Arc<Mutex<Persistent<BackendConfig>>>,
     pub secret_storage: Arc<OnceCell<Result<PlatformSecretStorage, SecretStorageError>>>,
     pub login_semaphore: Arc<Semaphore>,
     pub cached_minecraft_profiles: Arc<RwLock<FxHashMap<Uuid, CachedMinecraftProfile>>>,
@@ -240,7 +290,7 @@ impl BackendState {
     async fn start(self, recv: BackendReceiver, watcher_rx: Receiver<notify_debouncer_full::DebounceEventResult>) {
         log::info!("Starting backend");
 
-        tokio::task::spawn(crate::update::check_for_updates(self.redirecting_http_client.clone(), self.send.clone()));
+        tokio::task::spawn(crate::update::check_for_updates(self.http_client_provider.redirecting(), self.send.clone()));
 
         // Pre-fetch version manifest
         self.meta.preload(MinecraftVersionManifestMetadataItem);
@@ -300,8 +350,8 @@ impl BackendState {
 
         paths_with_time.sort_by_key(|(_, time)| *time);
         for (path, _) in paths_with_time {
-            let success = self.load_instance_from_path(&path, true, false);
-            if !success {
+            let instance = self.load_instance_from_path(&path, true, false);
+            if instance.is_none() {
                 self.file_watching.write().watch_filesystem(path.into(), WatchTarget::InvalidInstanceDir);
             }
         }
@@ -314,11 +364,13 @@ impl BackendState {
 
         if let Some(instance) = instance_state.instances.remove(id) {
             self.send.send(MessageToFrontend::InstanceRemoved { id });
-            self.send.send_info(format!("Instance '{}' removed", instance.name));
+            if instance.should_send_notifications() {
+                self.send.send_info(format!("Instance '{}' removed", instance.name));
+            }
         }
     }
 
-    pub fn load_instance_from_path(&self, path: &Path, mut show_errors: bool, show_success: bool) -> bool {
+    pub fn load_instance_from_path(&self, path: &Path, mut show_errors: bool, show_success: bool) -> Option<InstanceID> {
         let instance = Instance::load_from_folder(&path);
 
         let instance_id = {
@@ -342,7 +394,7 @@ impl BackendState {
                     log::error!("Error loading instance: {:?}", &error);
                 }
 
-                return false;
+                return None;
             };
 
             for existing in instance_state.instances.iter_mut() {
@@ -355,11 +407,11 @@ impl BackendState {
 
                 let _ = self.send.send(existing.create_modify_message());
 
-                if show_success {
+                if show_success && existing.should_send_notifications() {
                     self.send.send_info(format!("Instance '{}' updated", existing.name));
                 }
 
-                return true;
+                return Some(existing.id);
             }
 
             let generation = instance_state.instances_generation;
@@ -376,7 +428,7 @@ impl BackendState {
 
             self.restore_mods_folder_if_stopped(instance);
 
-            if show_success {
+            if show_success && instance.should_send_notifications() {
                 self.send.send_success(format!("Instance '{}' created", instance.name));
             }
             let message = MessageToFrontend::InstanceAdded {
@@ -399,7 +451,7 @@ impl BackendState {
         };
 
         self.file_watching.write().watch_filesystem(path.into(), WatchTarget::InstanceDir { id: instance_id });
-        true
+        Some(instance_id)
     }
 
     async fn handle(self: Arc<Self>, mut backend_recv: BackendReceiver, mut watcher_rx: Receiver<notify_debouncer_full::DebounceEventResult>) {
@@ -530,6 +582,30 @@ impl BackendState {
         self.quit_coordinator.set_can_quit(!any_process_alive);
     }
 
+    pub async fn update_http_clients(&self) {
+        let proxy_config = self.config.lock().get().proxy.clone();
+        let proxy_password: Option<String> = if proxy_config.enabled && proxy_config.auth_enabled {
+            match self.secret_storage.get_or_init(PlatformSecretStorage::new).await {
+                Ok(storage) => match storage.read_proxy_password().await {
+                    Ok(password) => password,
+                    Err(e) => {
+                        log::warn!("Failed to read proxy password from keyring: {:?}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    log::warn!("Failed to initialize secret storage: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        self.http_client_provider.update(&*schema::USER_AGENT, &proxy_config, proxy_password.as_deref());
+        self.meta.clear();
+    }
+
     pub async fn login(
         &self,
         credentials: &mut AccountCredentials,
@@ -538,7 +614,7 @@ impl BackendState {
     ) -> Result<(MinecraftProfileResponse, MinecraftAccessToken), LoginError> {
         log::info!("Starting login");
 
-        let mut authenticator = Authenticator::new(self.http_client.clone());
+        let mut authenticator = Authenticator::new(self.http_client_provider.client());
 
         if let Some(login_tracker) = login_tracker {
             login_tracker.set_total(AUTH_STAGE_COUNT as usize + 1);
@@ -738,7 +814,7 @@ impl BackendState {
         }
 
         log::info!("authlib_injector_authenticate called with email: {}, authlib_url: {}", email, authlib_url);
-        let client = auth::yggdrasil::YggdrasilClient::new(self.http_client.clone());
+        let client = auth::yggdrasil::YggdrasilClient::new(self.http_client_provider.client());
         let yggdrasil_response = match client.authenticate(authlib_url, email.trim(), password, "PandoraLauncher").await {
             Ok(response) => {
                 log::info!("YggdrasilClient::authenticate succeeded. Response profiles: {:?}", response.available_profiles.as_ref().map(|p| p.len()));
@@ -782,7 +858,7 @@ impl BackendState {
             return Err("Authlib server URL must start with http:// or https://".into());
         }
         log::info!("authlib_injector_refresh called with authlib_url: {}", authlib_url);
-        let client = auth::yggdrasil::YggdrasilClient::new(self.http_client.clone());
+        let client = auth::yggdrasil::YggdrasilClient::new(self.http_client_provider.client());
         match client.refresh(authlib_url, access_token, client_token).await {
             Ok(res) => {
                 log::info!("YggdrasilClient::refresh succeeded");
@@ -812,7 +888,7 @@ impl BackendState {
         if disable {
             crate::syncing::apply_to_instance(&SyncTargets::default(), &self.directories, path, &mut instances);
         } else {
-            crate::syncing::apply_to_instance(&self.config.write().get().sync_targets, &self.directories, path, &mut instances);
+            crate::syncing::apply_to_instance(&self.config.lock().get().sync_targets, &self.directories, path, &mut instances);
         }
     }
 
@@ -996,7 +1072,7 @@ impl BackendState {
         let mod_copies = self.apply_modpack_and_collect_mods(loader, minecraft_version, &mods, &dot_minecraft_dir, &mods_dir, modal_action).await;
 
         if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-            instance.set_frozen_mods_folder(true);
+            instance.frozen_mods_folder = true;
         }
 
         let original_mods_dir = root_dir.join("original_mods");
@@ -1427,7 +1503,7 @@ impl BackendState {
         }
     }
 
-    pub async fn create_instance_sanitized(&self, name: &str, version: &str, loader: Loader, icon: Option<EmbeddedOrRaw>) -> Option<PathBuf> {
+    pub fn create_instance_sanitized(&self, name: &str, version: &str, loader: Loader, icon: Option<EmbeddedOrRaw>) -> Option<PathBuf> {
         let mut name = sanitize_filename::sanitize_with_options(name, sanitize_filename::Options { windows: true, ..Default::default() });
 
         if self.instance_state.read().instances.iter().any(|i| i.name == name) {
@@ -1441,10 +1517,10 @@ impl BackendState {
             }
         }
 
-        return self.create_instance(&name, version, loader, icon).await;
+        return self.create_instance(&name, version, loader, icon);
     }
 
-    pub async fn create_instance(&self, name: &str, version: &str, loader: Loader, icon: Option<EmbeddedOrRaw>) -> Option<PathBuf> {
+    pub fn create_instance(&self, name: &str, version: &str, loader: Loader, icon: Option<EmbeddedOrRaw>) -> Option<PathBuf> {
         log::info!("Creating instance {name}");
         if !crate::fs::is_single_component_path_str(&name) {
             self.send.send_warning(format!("Unable to create instance, name must not be a path: {}", name));

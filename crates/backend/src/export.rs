@@ -123,7 +123,7 @@ pub async fn export_instance(
                 root_path: Arc::clone(&instance.root_path),
                 dot_minecraft_path: Arc::clone(&instance.dot_minecraft_path),
                 configuration: instance.configuration.get().clone(),
-                sync_targets: backend.config.write().get().sync_targets.clone(),
+                sync_targets: backend.config.lock().get().sync_targets.clone(),
             })
         } else {
             None

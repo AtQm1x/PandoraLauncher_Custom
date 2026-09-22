@@ -802,24 +802,27 @@ impl Render for CurseforgeSearchPage {
             .child(top_bar)
             .child(div().size_full().rounded_lg().border_1().border_color(theme.border).child(list));
 
+        let disabled_color = cx.theme().button_foreground.opacity(0.5);
+        let selection_button = |id: &'static str, selected: bool| -> Button {
+            Button::new(id).selected(selected).when(!selected, |b| b.text_color(disabled_color))
+        };
+
         let config = InterfaceConfig::get(cx);
         let filter_project_type = config.curseforge_page_class_id;
 
         let type_button_group = ButtonGroup::new("type")
             .layout(Axis::Vertical)
             .outline()
-            .child(Button::new("mods").label(t::instance::content::mods()).selected(filter_project_type == CurseforgeClassId::Mod))
-            .child(
-                Button::new("modpacks")
-                    .label(t::instance::content::modpacks())
-                    .selected(filter_project_type == CurseforgeClassId::Modpack),
+            .child(selection_button("mods", filter_project_type == CurseforgeClassId::Mod)
+                .label(t::instance::content::mods()))
+            .child(selection_button("modpacks", filter_project_type == CurseforgeClassId::Modpack)
+                .label(t::instance::content::modpacks())
             )
-            .child(
-                Button::new("resourcepacks")
-                    .label(t::instance::content::resourcepacks())
-                    .selected(filter_project_type == CurseforgeClassId::Resourcepack),
+            .child(selection_button("resourcepacks", filter_project_type == CurseforgeClassId::Resourcepack)
+                .label(t::instance::content::resourcepacks())
             )
-            .child(Button::new("shaders").label(t::instance::content::shaders()).selected(filter_project_type == CurseforgeClassId::Shader))
+            .child(selection_button("shaders", filter_project_type == CurseforgeClassId::Shader)
+                .label(t::instance::content::shaders()))
             .on_click(cx.listener(|page, clicked: &Vec<usize>, window, cx| match clicked[0] {
                 0 => page.set_project_type(CurseforgeClassId::Mod, window, cx),
                 1 => page.set_project_type(CurseforgeClassId::Modpack, window, cx),
@@ -833,9 +836,9 @@ impl Render for CurseforgeSearchPage {
                 .layout(Axis::Vertical)
                 .outline()
                 .multiple(true)
-                .child(Button::new("fabric").label(t::modrinth::category::fabric()).selected(self.filter_loaders.contains(Loader::Fabric)))
-                .child(Button::new("forge").label(t::modrinth::category::forge()).selected(self.filter_loaders.contains(Loader::Forge)))
-                .child(Button::new("neoforge").label(t::modrinth::category::neoforge()).selected(self.filter_loaders.contains(Loader::NeoForge)))
+                .child(selection_button("fabric", self.filter_loaders.contains(Loader::Fabric)).label(t::modrinth::category::fabric()))
+                .child(selection_button("forge", self.filter_loaders.contains(Loader::Forge)).label(t::modrinth::category::forge()))
+                .child(selection_button("neoforge", self.filter_loaders.contains(Loader::NeoForge)).label(t::modrinth::category::neoforge()))
                 .on_click(cx.listener(|page, clicked: &Vec<usize>, window, cx| {
                     page.set_filter_loaders(clicked.iter().filter_map(|index| match index {
                         0 => Some(Loader::Fabric),
@@ -880,6 +883,7 @@ impl Render for CurseforgeSearchPage {
                             h_flex().w_full().justify_start().gap_2()
                             .child(SharedString::new(*name)))
                         .selected(self.filter_categories.contains(id))
+                        .when(!self.filter_categories.contains(id), |b| b.text_color(disabled_color))
                 }))
                 .on_click(cx.listener(|page, clicked: &Vec<usize>, window, cx| {
                     page.set_filter_categories(clicked.iter()
@@ -912,6 +916,7 @@ impl Render for CurseforgeSearchPage {
                             h_flex().w_full().justify_start().gap_2()
                             .child(t::curseforge::sort::get(field.as_str()).unwrap_or("missing_translation")))
                         .selected(id == self.sort_field.clone() as u32)
+                        .when(id != self.sort_field.clone() as u32, |b| b.text_color(disabled_color))
                 }))
                 .on_click(cx.listener(move |page, clicked: &Vec<usize>, window, cx| {
                     let sort_field = CurseforgeSortField::iter().nth(clicked[0]).unwrap_or_default();
@@ -922,9 +927,9 @@ impl Render for CurseforgeSearchPage {
         let is_mod = filter_project_type == CurseforgeClassId::Mod || filter_project_type == CurseforgeClassId::Modpack;
         let filter_version_toggle = if is_mod && let Some(filter_version) = self.filter_version {
             let title = format!("{}: {}", t::instance::version(), filter_version);
-            Some(Button::new("filter_version").label(title)
+            Some(selection_button("filter_version", InterfaceConfig::get(cx).content_filter_version)
+                .label(title)
                 .outline()
-                .selected(InterfaceConfig::get(cx).content_filter_version)
                 .on_click(cx.listener(|page, _, _, cx| {
                     let cfg = InterfaceConfig::get_mut(cx);
                     cfg.content_filter_version = !cfg.content_filter_version;

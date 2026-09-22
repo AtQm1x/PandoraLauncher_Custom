@@ -6,7 +6,7 @@ use schema::{
     backend_config::{BackendConfig, ProxyConfig}, instance::{
         InstanceConfiguration, InstanceJvmBinaryConfiguration, InstanceJvmFlagsConfiguration,
         InstanceLinuxWrapperConfiguration, InstanceMemoryConfiguration, InstanceSystemLibrariesConfiguration, InstanceWrapperCommandConfiguration, UpdateChannel,
-    }, loader::Loader, minecraft_profile::{MinecraftProfileCape, SkinVariant}, pandora_update::UpdatePrompt, unique_bytes::UniqueBytes
+    }, loader::Loader, minecraft_profile::{MinecraftProfileCape, SkinVariant}, pandora_update::UpdatePrompt, quickplay::QuickplayPreset, unique_bytes::UniqueBytes
 };
 use ustr::Ustr;
 use uuid::Uuid;
@@ -16,13 +16,6 @@ use crate::{
         ContentFolder, InstanceContentID, InstanceContentSummary, InstanceID, InstancePlaytime, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
     }, manual_download::{ManualCurseforgeDownloadRequest}, meta::{MetadataRequest, MetadataResult}, modal_action::ModalAction, notify_signal::KeepAliveNotifySignalHandle,
 };
-
-#[derive(Debug)]
-#[derive(Default)]
-pub struct BackendConfigWithPassword {
-    pub config: BackendConfig,
-    pub proxy_password: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -165,6 +158,13 @@ pub enum MessageToBackend {
         live_game_output: Option<tokio::sync::oneshot::Sender<tokio::sync::mpsc::UnboundedReceiver<GameOutputMsg>>>,
         modal_action: ModalAction,
     },
+    StartQuickplayInstance {
+        preset: QuickplayPreset,
+        minecraft_version: Ustr,
+        quick_play: Option<QuickPlayLaunch>,
+        live_game_output: Option<tokio::sync::oneshot::Sender<tokio::sync::mpsc::UnboundedReceiver<GameOutputMsg>>>,
+        modal_action: ModalAction,
+    },
     RequestLoadWorlds {
         id: InstanceID,
     },
@@ -244,7 +244,12 @@ pub enum MessageToBackend {
         channel: tokio::sync::oneshot::Sender<SyncState>,
     },
     GetBackendConfiguration {
-        channel: tokio::sync::oneshot::Sender<BackendConfigWithPassword>,
+        channel: tokio::sync::oneshot::Sender<BackendConfig>,
+    },
+    SetLaunchDefaults {
+        memory: Option<InstanceMemoryConfiguration>,
+        jvm_flags: Option<InstanceJvmFlagsConfiguration>,
+        jvm_binary: Option<InstanceJvmBinaryConfiguration>,
     },
     SetSyncing {
         target: Arc<str>,
@@ -283,7 +288,9 @@ pub enum MessageToBackend {
     },
     SetProxyConfiguration {
         config: ProxyConfig,
-        password: Option<String>,
+    },
+    SetProxyPassword {
+        password: String,
     },
     SetAuthlibInjectorUrl {
         url: Option<String>,
@@ -340,6 +347,10 @@ pub enum MessageToBackend {
         modal_action: ModalAction,
     },
     Quit,
+    MoveInstanceToGroup {
+        instance_id: InstanceID,
+        group: Arc<str>
+    },
 }
 
 #[derive(Debug)]
